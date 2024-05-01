@@ -3,12 +3,13 @@ from typing import Callable
 import pybamm
 from numpy import exp, ndarray, tanh
 
+#全局参数
 parameter_values = pybamm.ParameterValues("OKane2022")
 
 Cp_max = parameter_values["Maximum concentration in positive electrode [mol.m-3]"]
 Cn_max = parameter_values["Maximum concentration in negative electrode [mol.m-3]"]
 
-
+#正极OCV计算公式
 def get_nmc_ocp(Cs: float | ndarray) -> Callable:
     """
     NMC-811 open circuit potential as a function of concentration. OCP function obtained
@@ -35,7 +36,7 @@ def get_nmc_ocp(Cs: float | ndarray) -> Callable:
         + 17.5842 * tanh(15.9308 * (sto - 0.3120))
     )
 
-
+#负极OCV计算公式
 def get_graphite_ocp(Cs: float | ndarray):
     """
     Graphite open circuit potential as a function of concentration. OCP function obtained

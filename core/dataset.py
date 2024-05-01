@@ -8,10 +8,11 @@ from torch.utils.data import Dataset
 
 from core.physics_model import SPM
 
-
+#加载生成的电池模拟数据，规范化并转换为适合神经网络训练的格式
 class SimulationDataset(Dataset):
+    #数据规范化
     norm_settings = {
-        SPM.time_col: (0, 30),
+        SPM.time_col: (0, 50),
         SPM.rp_col: (0, 6e-6),
         SPM.rn_col: (0, 6e-6),
     }
@@ -22,6 +23,7 @@ class SimulationDataset(Dataset):
             for file_path in os.listdir(data_directory)
         ]
 
+    #加载和处理数据
     def get_data(self, file_path: str) -> dict:
         with open(file_path, "rb") as binary_file:
             data = pickle.load(binary_file)
@@ -44,6 +46,7 @@ class SimulationDataset(Dataset):
 
         return I, Xp, Xn, Y, (N_t, N_rp, N_rn)
 
+    #数据规范化
     def normalize_data(self, data: dict):
         for col, norm_range in self.norm_settings.items():
             min_val, max_val = norm_range

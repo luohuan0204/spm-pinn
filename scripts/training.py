@@ -12,10 +12,15 @@ from core.physics_model import SPM
 from core.training_module import TrainingModule
 from torch import optim, vmap
 import pickle
+import torch
 
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+#数据加载
 dataset = SimulationDataset(data_directory="../data")
+#初始化数据模块，设置训练集比例为 100%
 data_module = DataModule(dataset=dataset, train_split=1, val_split=0, test_split=0)
 
+#模型初始化
 model = SPM_PINN(
     Up=vmap(get_nmc_ocp),  # Positive electrode OCP as f(conc) [V]
     Cp_0=35263,  # Initial positive electrode Li concentration [mol/m3]
@@ -25,7 +30,7 @@ model = SPM_PINN(
     Lp=75.6e-6,  # Positive Electrode thickness [m]
     kp=5e-10,  # Positive electrode reaction rate constant [m^2.5/(mol^0.5.s)]
     Dp=1e-14,  # Positive electrode diffusivity [m2/s]
-    Un=vmap(get_graphite_ocp),  # Negative electrode OCP as f(conc) [V]
+    Un=vmap(get_graphite_ocp),  # Negatzive electrode OCP as f(conc) [V]
     Cn_0=15528,  # Initial negative electrode Li concentration [mol/m3]
     Cn_max=33133,  # Max negative electrode Li concentration [mol/m3]
     Rn=5.22e-6,  # Negative electrode particle radius [m]
@@ -37,21 +42,26 @@ model = SPM_PINN(
     R_cell=3.24e-4,  # Cell resistance [ohm m2])
     nn_hidden_size=20,
     nn_num_hidden_layers=8,
-)
+).to(device)
+#损失函数和优化器
 loss_fn = PINNLoss()
-optimizer_algorithm = optim.LBFGS
-optimizer_kwargs = {"lr": 0.01}
+optimizer_algorithm = optim.Adam
+optimizer_kwargs = {"lr": 1e-3}
 optimizer = optimizer_algorithm(params=model.parameters(), **optimizer_kwargs)
 
+#训练模块
 training_module = TrainingModule(
     model=model,
     loss_function=loss_fn,
     optimizer=optimizer,
 )
 
+#训练器
 trainer = pl.Trainer(
-    # max_epochs=500,
-    max_time={"seconds": 1800},
+    accelerator="gpu",
+    devices=1,
+    # max_epochs=100,
+    max_time={"seconds": 1200},
     logger=True,
     enable_progress_bar=False,
     enable_model_summary=False,
@@ -60,6 +70,7 @@ trainer = pl.Trainer(
 
 trainer.fit(training_module, data_module)
 
+#模型预测
 I, Xp, Xn, Y, (N_t, N_rp, N_rn) = dataset[0]
 out = model(I, Xp, Xn, N_t)
 
@@ -72,12 +83,13 @@ Cnlast = model.Cn[Xn[:, 0] == 1].detach().numpy()[:, 0]
 Cp_surf = model.Cp[-N_t:].detach().numpy()[:, 0]
 Cn_surf = model.Cn[-N_t:].detach().numpy()[:, 0]
 
+#加载真实数据用于对比
 with open("../data/spm0_Dp=1e-14_Dn=3e-14", "rb") as binary_file:
     true_data = pickle.load(binary_file)
 
 
 # =========== Plots ================
-
+#可视化
 plot(
     x=[
         true_data.get(SPM.rp_col)[0],
@@ -138,7 +150,7 @@ plot(
     lines=True,
     markers=False,
     x_label=SPM.time_col,
-    y_label=SPM.cp_surf_col,
+    y_label=SPM.cn_surf_col,
     title="Negative electrode surface concentration",
 )
 

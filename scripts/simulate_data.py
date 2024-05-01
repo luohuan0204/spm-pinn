@@ -7,10 +7,12 @@ from core.ocp import get_graphite_ocp, get_nmc_ocp
 from core.physics_model import SPM
 
 if __name__ == "__main__":
+    #设置正负极扩散系数
     Dps = (1e-14,)
     Dns = (3e-14,)
 
     for n, (Dp, Dn) in enumerate(zip(Dps, Dns)):
+        #初始化spm模型
         spm = SPM(
             Up=get_nmc_ocp,  # Positive electrode OCP as f(conc) [V]
             Cp_0=35263,  # Initial positive electrode Li concentration [mol/m3]
@@ -31,7 +33,8 @@ if __name__ == "__main__":
             Ce=1000,  # Electrolyte Li concentration [mol/m3]
             R_cell=3.24e-4,  # Cell resistance [ohm m2]
         )
+        # 运行模拟
         data = spm.solve(duration=100, current_density=20, delta_t=1)
-
+        #保存模拟结果
         with open(f"../data/spm{n}_Dp={Dp}_Dn={Dn}", "ab") as binary_file:
             pickle.dump(data, binary_file)

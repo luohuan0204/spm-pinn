@@ -1,7 +1,7 @@
 import lightning as L
 from torch.utils.data import DataLoader, Dataset, random_split
 
-
+#划分数据集
 class DataModule(L.LightningDataModule):
     """Data module that splits dataset into train, validation and test."""
 
@@ -29,6 +29,7 @@ class DataModule(L.LightningDataModule):
         num_validation_set = round(self.val_split * num_dataset)
         num_test_set = round(self.test_split * num_dataset)
 
+        #数据集随机分割
         self.training_set, self.validation_set, self.test_set = random_split(
             self.dataset, [num_training_set, num_validation_set, num_test_set]
         )

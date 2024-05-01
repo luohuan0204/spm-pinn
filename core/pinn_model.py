@@ -2,7 +2,7 @@ from typing import Callable
 
 from torch import Tensor, log, nn, sqrt
 
-
+#全连接深度神经网络
 class DNN(nn.Module):
     """
     Deep neural network.
@@ -35,7 +35,7 @@ class DNN(nn.Module):
 
         return dnn_output
 
-
+#基于神经网络的单粒子模型，使用两个DNN分别预测正负极的锂离子浓度，并利用物理方程计算电池电压
 class SPM_PINN(nn.Module):
     """
     Single Particle Model with solid diffusion modeled by neural networks.

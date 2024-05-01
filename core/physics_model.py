@@ -10,7 +10,7 @@ from fipy import (
 )
 from numpy import log, sqrt
 
-
+#使用 FiPy 求解球形坐标系下的一维扩散方程，模拟锂离子在电极颗粒中的扩散，为正极和负极的浓度分布提供数值解
 class SolidDiffusionSolver:
     """
     Finite volume solver of 1D diffusion equation in spherical coordinates using FiPy.
@@ -50,6 +50,7 @@ class SolidDiffusionSolver:
             self.c_surf_col: [],
         }
 
+    #运行 SPM 模拟，计算电池在给定电流密度下的电压和浓度分布
     def solve(self, time: np.ndarray, mass_flux: np.ndarray) -> dict:
         self._reset_data()
         dt_array = np.diff(time, prepend=0)

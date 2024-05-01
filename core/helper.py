@@ -5,7 +5,7 @@ import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
-
+#使用 Plotly 创建交互式散点图，支持多序列、主/次 y 轴、误差条、悬停信息、对数刻度等
 def plot(
     x: list[list | np.ndarray | pd.Series],
     y: list[list | np.ndarray | pd.Series],

@@ -1,16 +1,16 @@
 import torch
 from torch import Tensor, mean, nn, square
 
-
+#PINN的损失函数，包含5个损失项
 class PINNLoss(nn.Module):
     def __init__(self):
         super().__init__()
 
-        self.w1 = 2
-        self.w2 = 1
-        self.w3 = 1
-        self.w4 = 1
-        self.w5 = 10
+        self.w1 = 2 #扩散方程损失权重
+        self.w2 = 1 #中心边界条件损失权重
+        self.w3 = 1 #表面边界条件损失权重
+        self.w4 = 1 #初始条件损失权重
+        self.w5 = 10 #数据损失权重
 
     def forward(
         self, V_pred: Tensor, V_true: Tensor, Xp: Tensor, Xn: Tensor, N_t: int, model
@@ -38,6 +38,7 @@ class PINNLoss(nn.Module):
             create_graph=True,
         )[0]
 
+        #从梯度中提取时间和空间导数，并进行反归一化
         dCp_dt = Cp_grad[:, 0] / 50
         dCp_dr = Cp_grad[:, 1] / 6e-6
         dCn_dt = Cn_grad[:, 0] / 50
@@ -114,7 +115,7 @@ class PINNLoss(nn.Module):
             + self.w5 * s5 * t5
         )
 
-
+#均方根误差损失
 class RMSE(nn.Module):
     """Root mean square error loss function."""
 
