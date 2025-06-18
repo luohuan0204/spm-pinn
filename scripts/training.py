@@ -1,4 +1,8 @@
 import sys
+import os
+
+from matplotlib import pyplot as plt
+from pytorch_lightning.loggers import TensorBoardLogger
 
 sys.path.append("../")
 import lightning.pytorch as pl
@@ -15,6 +19,11 @@ import pickle
 import torch
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+# 创建结果目录
+os.makedirs("results/plots", exist_ok=True)
+os.makedirs("results/checkpoints", exist_ok=True)
+os.makedirs("results/logs", exist_ok=True)
 #数据加载
 dataset = SimulationDataset(data_directory="../data")
 #初始化数据模块，设置训练集比例为 100%
@@ -46,7 +55,7 @@ model = SPM_PINN(
 #损失函数和优化器
 loss_fn = PINNLoss()
 optimizer_algorithm = optim.Adam
-optimizer_kwargs = {"lr": 1e-3}
+optimizer_kwargs = {"lr": 1e-4}
 optimizer = optimizer_algorithm(params=model.parameters(), **optimizer_kwargs)
 
 #训练模块
@@ -57,13 +66,14 @@ training_module = TrainingModule(
 )
 
 #训练器
+logger = TensorBoardLogger("results/logs", name="spm_pinn")
 trainer = pl.Trainer(
-    accelerator="gpu",
+    accelerator="gpu" if torch.cuda.is_available() else "cpu",
     devices=1,
-    # max_epochs=100,
-    max_time={"seconds": 1200},
+    max_epochs=100,
+    # max_time={"seconds": 60},
     logger=True,
-    enable_progress_bar=False,
+    enable_progress_bar=True,
     enable_model_summary=False,
     enable_checkpointing=False,
 )
@@ -71,7 +81,10 @@ trainer = pl.Trainer(
 trainer.fit(training_module, data_module)
 
 #模型预测
+model.eval()
+model.to(device)
 I, Xp, Xn, Y, (N_t, N_rp, N_rn) = dataset[0]
+I, Xp, Xn, Y, N_t = I.to(device), Xp.to(device), Xn.to(device), Y.to(device), N_t.to(device)
 out = model(I, Xp, Xn, N_t)
 
 Cp0 = model.Cp[Xp[:, 0] == -1].detach().numpy()[:, 0]
@@ -89,6 +102,18 @@ with open("../data/spm0_Dp=1e-14_Dn=3e-14", "rb") as binary_file:
 
 
 # =========== Plots ================
+# 保存可视化结果
+def save_plot(x, y, series_names, x_label, y_label, title, filename):
+    plt.figure(figsize=(10, 6))
+    for xi, yi, name in zip(x, y, series_names):
+        plt.plot(xi, yi, label=name)
+    plt.xlabel(x_label)
+    plt.ylabel(y_label)
+    plt.title(title)
+    plt.legend()
+    plt.grid(True)
+    plt.savefig(os.path.join("results/plots", filename))
+    plt.close()
 #可视化
 plot(
     x=[
