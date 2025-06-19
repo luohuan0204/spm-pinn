@@ -26,7 +26,7 @@ if __name__ == "__main__":
             Cn_0=15528,  # Initial negative electrode Li concentration [mol/m3]
             Cn_max=33133,  # Max negative electrode Li concentration [mol/m3]
             Rn=5.22e-6,  # Negative electrode particle radius [m]
-            en_s=0.335,  # Negative electrode volume fraction [-]
+            en_s=0.75,  # Negative electrode volume fraction [-]
             Ln=75.6e-6,  # Negative Electrode thickness [m]
             kn=5e-10,  # Negative electrode reaction rate constant [m^2.5/(mol^0.5.s)]
             Dn=Dn,  # Negative electrode diffusivity [m2/s]

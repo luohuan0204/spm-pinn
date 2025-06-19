@@ -8,9 +8,9 @@ class PINNLoss(nn.Module):
 
         self.w1 = 2 #扩散方程损失权重
         self.w2 = 1 #中心边界条件损失权重
-        self.w3 = 1 #表面边界条件损失权重
-        self.w4 = 1 #初始条件损失权重
-        self.w5 = 10 #数据损失权重
+        self.w3 = 5 #表面边界条件损失权重
+        self.w4 = 10 #初始条件损失权重
+        self.w5 = 50 #数据损失权重
 
     def forward(
         self, V_pred: Tensor, V_true: Tensor, Xp: Tensor, Xn: Tensor, N_t: int, model
