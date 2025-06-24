@@ -8,7 +8,7 @@ class PINNLoss(nn.Module):
 
         self.w1 = 2 #扩散方程损失权重
         self.w2 = 1 #中心边界条件损失权重
-        self.w3 = 5 #表面边界条件损失权重
+        self.w3 = 1 #表面边界条件损失权重
         self.w4 = 10 #初始条件损失权重
         self.w5 = 50 #数据损失权重
 
@@ -39,10 +39,10 @@ class PINNLoss(nn.Module):
         )[0]
 
         #从梯度中提取时间和空间导数，并进行反归一化
-        dCp_dt = Cp_grad[:, 0] / 100
-        dCp_dr = Cp_grad[:, 1] / 5.22e-6
-        dCn_dt = Cn_grad[:, 0] / 100
-        dCn_dr = Cn_grad[:, 1] / 5.22e-6
+        dCp_dt = Cp_grad[:, 0] * (2 / 100)
+        dCp_dr = Cp_grad[:, 1] * (2 / 5.22e-6 )
+        dCn_dt = Cn_grad[:, 0] * (2 / 100)
+        dCn_dr = Cn_grad[:, 1] * (2 / 5.22e-6 )
 
         tp = model.unnormalize_data(Xp[:, 0], 100)
         rp = model.unnormalize_data(Xp[:, 1], 5.22e-6)
@@ -89,14 +89,14 @@ class PINNLoss(nn.Module):
         t5 = mse_loss_fn(V_pred, V_true)
 
         s1_p = square(max(tp)) / (Cp_max - Cp_min) ** 2
-        s2_p = Rp**2 / (Cp_max - Cp_min) ** 2
+        s2_p = Rp ** 2 / Cp_min ** 2
         s3_p = 1 / max(square(jp))
-        s4_p = 1 / (Cp_max - Cp_min) ** 2
+        s4_p = 1 / Cp_min ** 2
 
         s1_n = square(max(tn)) / (Cn_max - Cn_min) ** 2
-        s2_n = Rn**2 / (Cn_max - Cn_min) ** 2
+        s2_n = Rn ** 2 / Cn_min ** 2
         s3_n = 1 / max(square(jn))
-        s4_n = 1 / (Cn_max - Cn_min) ** 2
+        s4_n = 1 / Cn_min ** 2
         s5 = 1 / (V_max - V_min) ** 2
 
         print(

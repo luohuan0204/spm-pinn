@@ -59,7 +59,7 @@ class SolidDiffusionSolver:
 
         for index, (dt, j) in enumerate(zip(dt_array, mass_flux)):
             if dt > 0:
-                mass_flux = -j / self.F
+                mass_flux = -j / self.D
                 self.conc.faceGrad.constrain([mass_flux], self.mesh.facesRight)
                 self.equation.solve(var=self.conc, dt=dt)
 
