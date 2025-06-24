@@ -29,7 +29,9 @@ class SolidDiffusionSolver:
         alpha: float = 0.5,  # Time stepping scheme blend factor
         R: float = 5e-6,  # Radius of sphere
         nr: int = 20,  # Number of space discretization
+        F: float = 96485.33 #法拉第常数
     ):
+        self.F = F
         self.D = D
         self.mesh = SphericalGrid1D(nr=nr, Lr=R)
         self.conc = CellVariable(mesh=self.mesh, name=r"$c$", value=c0)
@@ -57,7 +59,7 @@ class SolidDiffusionSolver:
 
         for index, (dt, j) in enumerate(zip(dt_array, mass_flux)):
             if dt > 0:
-                mass_flux = -j / self.D
+                mass_flux = -j / self.F
                 self.conc.faceGrad.constrain([mass_flux], self.mesh.facesRight)
                 self.equation.solve(var=self.conc, dt=dt)
 

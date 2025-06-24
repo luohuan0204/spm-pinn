@@ -54,7 +54,7 @@ model = SPM_PINN(
 # 损失函数和优化器
 loss_fn = PINNLoss()
 optimizer_algorithm = optim.Adam
-optimizer_kwargs = {"lr": 1e-3}
+optimizer_kwargs = {"lr": 1e-4}
 optimizer = optimizer_algorithm(params=model.parameters(), **optimizer_kwargs)
 
 # 训练模块
@@ -69,7 +69,7 @@ logger = TensorBoardLogger("results/logs", name="spm_pinn")
 trainer = pl.Trainer(
     accelerator="gpu" if torch.cuda.is_available() else "cpu",
     devices=1,
-    max_epochs=1000,
+    max_epochs=100,
     logger=True,
     enable_progress_bar=True,
     enable_model_summary=False,

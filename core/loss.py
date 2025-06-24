@@ -39,15 +39,15 @@ class PINNLoss(nn.Module):
         )[0]
 
         #从梯度中提取时间和空间导数，并进行反归一化
-        dCp_dt = Cp_grad[:, 0] / 50
-        dCp_dr = Cp_grad[:, 1] / 6e-6
-        dCn_dt = Cn_grad[:, 0] / 50
-        dCn_dr = Cn_grad[:, 1] / 6e-6
+        dCp_dt = Cp_grad[:, 0] / 100
+        dCp_dr = Cp_grad[:, 1] / 5.22e-6
+        dCn_dt = Cn_grad[:, 0] / 100
+        dCn_dr = Cn_grad[:, 1] / 5.22e-6
 
-        tp = model.unnormalize_data(Xp[:, 0], 50)
-        rp = model.unnormalize_data(Xp[:, 1], 6e-6)
-        tn = model.unnormalize_data(Xn[:, 0], 50)
-        rn = model.unnormalize_data(Xn[:, 1], 6e-6)
+        tp = model.unnormalize_data(Xp[:, 0], 100)
+        rp = model.unnormalize_data(Xp[:, 1], 5.22e-6)
+        tn = model.unnormalize_data(Xn[:, 0], 100)
+        rn = model.unnormalize_data(Xn[:, 1], 5.22e-6)
 
         ITp = square(rp) * Dp * dCp_dr  # intermediate term
         ITp_grad = torch.autograd.grad(
@@ -57,7 +57,7 @@ class PINNLoss(nn.Module):
             retain_graph=True,
             create_graph=True,
         )[0]
-        dITp_dr = ITp_grad[:, 1] / 6e-6
+        dITp_dr = ITp_grad[:, 1] / 5.22e-6
 
         ITn = square(rn) * Dn * dCn_dr  # intermediate term
         ITn_grad = torch.autograd.grad(
@@ -67,7 +67,7 @@ class PINNLoss(nn.Module):
             retain_graph=True,
             create_graph=True,
         )[0]
-        dITn_dr = ITn_grad[:, 1] / 6e-6
+        dITn_dr = ITn_grad[:, 1] / 5.22e-6
 
         Cp_max, Cp_min = max(Cp), min(Cp)
         Cn_max, Cn_min = max(Cn), min(Cn)
