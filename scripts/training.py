@@ -69,7 +69,7 @@ logger = TensorBoardLogger("results/logs", name="spm_pinn")
 trainer = pl.Trainer(
     accelerator="gpu" if torch.cuda.is_available() else "cpu",
     devices=1,
-    max_epochs=100,
+    max_epochs=1000,
     logger=True,
     enable_progress_bar=True,
     enable_model_summary=False,
