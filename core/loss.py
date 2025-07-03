@@ -6,11 +6,11 @@ class PINNLoss(nn.Module):
     def __init__(self):
         super().__init__()
 
-        self.w1 = 2 #扩散方程损失权重
-        self.w2 = 1 #中心边界条件损失权重
-        self.w3 = 5 #表面边界条件损失权重
-        self.w4 = 10 #初始条件损失权重
-        self.w5 = 50 #数据损失权重
+        self.w1 = 0 #扩散方程损失权重
+        self.w2 = 0 #中心边界条件损失权重
+        self.w3 = 0 #表面边界条件损失权重
+        self.w4 = 0 #初始条件损失权重
+        self.w5 = 1 #数据损失权重
 
     def forward(
         self, V_pred: Tensor, V_true: Tensor, Xp: Tensor, Xn: Tensor, N_t: int, model
@@ -39,14 +39,14 @@ class PINNLoss(nn.Module):
         )[0]
 
         #从梯度中提取时间和空间导数，并进行反归一化
-        dCp_dt = Cp_grad[:, 0] / 100
+        dCp_dt = Cp_grad[:, 0] / 1000
         dCp_dr = Cp_grad[:, 1] / 5.22e-6
-        dCn_dt = Cn_grad[:, 0] / 100
+        dCn_dt = Cn_grad[:, 0] / 1000
         dCn_dr = Cn_grad[:, 1] / 5.22e-6
 
-        tp = model.unnormalize_data(Xp[:, 0], 100)
+        tp = model.unnormalize_data(Xp[:, 0], 1000)
         rp = model.unnormalize_data(Xp[:, 1], 5.22e-6)
-        tn = model.unnormalize_data(Xn[:, 0], 100)
+        tn = model.unnormalize_data(Xn[:, 0], 1000)
         rn = model.unnormalize_data(Xn[:, 1], 5.22e-6)
 
         ITp = square(rp) * Dp * dCp_dr  # intermediate term
@@ -99,20 +99,35 @@ class PINNLoss(nn.Module):
         s4_n = 1 / (Cn_max - Cn_min) ** 2
         s5 = 1 / (V_max - V_min) ** 2
 
+        # print(
+        #     f"t1_p={(self.w1 * s1_p * t1_p).item():.2E}, t1_n={(self.w1 * s1_n * t1_n).item():.2E}, t2_p={(self.w2 * s2_p * t2_p).item():.2E}, t2_n={(self.w2 * s2_n * t2_n).item():.2E}, t3_p={(self.w3 * s3_p * t3_p).item():.2E}, t3_n={(self.w3 * s3_n * t3_n).item():.2E}, t4_p={(self.w4 * s4_p * t4_p).item():.2E}, t4_n={(self.w4 * s4_n * t4_n).item():.2E}, t5={(self.w5 * s5 * t5).item():.2E}"
+        # )
         print(
-            f"t1_p={(self.w1 * s1_p * t1_p).item():.2E}, t1_n={(self.w1 * s1_n * t1_n).item():.2E}, t2_p={(self.w2 * s2_p * t2_p).item():.2E}, t2_n={(self.w2 * s2_n * t2_n).item():.2E}, t3_p={(self.w3 * s3_p * t3_p).item():.2E}, t3_n={(self.w3 * s3_n * t3_n).item():.2E}, t4_p={(self.w4 * s4_p * t4_p).item():.2E}, t4_n={(self.w4 * s4_n * t4_n).item():.2E}, t5={(self.w5 * s5 * t5).item():.2E}"
+            f"t1_p={(self.w1 * t1_p).item():.2E}, t1_n={(self.w1 * t1_n).item():.2E}, t2_p={(self.w2 * t2_p).item():.2E}, t2_n={(self.w2 * t2_n).item():.2E}, t3_p={(self.w3 * t3_p).item():.2E}, t3_n={(self.w3 * t3_n).item():.2E}, t4_p={(self.w4 * t4_p).item():.2E}, t4_n={(self.w4 * t4_n).item():.2E}, t5={(self.w5 * t5).item():.2E}"
         )
 
+        # return (
+        #     self.w1 * s1_p * t1_p
+        #     + self.w1 * s1_n * t1_n
+        #     + self.w2 * s2_p * t2_p
+        #     + self.w2 * s2_n * t2_n
+        #     + self.w3 * s3_p * t3_p
+        #     + self.w3 * s3_n * t3_n
+        #     + self.w4 * s4_p * t4_p
+        #     + self.w4 * s4_n * t4_n
+        #     + self.w5 * s5 * t5
+        # )
+
         return (
-            self.w1 * s1_p * t1_p
-            + self.w1 * s1_n * t1_n
-            + self.w2 * s2_p * t2_p
-            + self.w2 * s2_n * t2_n
-            + self.w3 * s3_p * t3_p
-            + self.w3 * s3_n * t3_n
-            + self.w4 * s4_p * t4_p
-            + self.w4 * s4_n * t4_n
-            + self.w5 * s5 * t5
+                self.w1 * t1_p
+                + self.w1 * t1_n
+                + self.w2 * t2_p
+                + self.w2 * t2_n
+                + self.w3 * t3_p
+                + self.w3 * t3_n
+                + self.w4 * t4_p
+                + self.w4 * t4_n
+                + self.w5 * t5
         )
 
 #均方根误差损失

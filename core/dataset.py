@@ -12,7 +12,7 @@ from core.physics_model import SPM
 class SimulationDataset(Dataset):
     #数据规范化
     norm_settings = {
-        SPM.time_col: (0, 100),
+        SPM.time_col: (0, 1000),
         SPM.rp_col: (0, 5.22e-6),
         SPM.rn_col: (0, 5.22e-6),
     }

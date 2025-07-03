@@ -30,7 +30,7 @@ data_module = DataModule(dataset=dataset, train_split=1, val_split=0, test_split
 # 模型初始化
 model = SPM_PINN(
     Up=vmap(get_nmc_ocp),
-    Cp_0=35263,
+    Cp_0=17038,
     Cp_max=63104,
     Rp=5.22e-6,
     ep_s=0.335,
@@ -38,7 +38,7 @@ model = SPM_PINN(
     kp=5e-10,
     Dp=1e-14,
     Un=vmap(get_graphite_ocp),
-    Cn_0=15528,
+    Cn_0=29866,
     Cn_max=33133,
     Rn=5.22e-6,
     en_s=0.75,
@@ -69,7 +69,7 @@ logger = TensorBoardLogger("results/logs", name="spm_pinn")
 trainer = pl.Trainer(
     accelerator="gpu" if torch.cuda.is_available() else "cpu",
     devices=1,
-    max_epochs=1000,
+    max_epochs=100,
     logger=True,
     enable_progress_bar=True,
     enable_model_summary=False,
