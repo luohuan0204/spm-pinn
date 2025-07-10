@@ -1,6 +1,7 @@
 import sys
 import os
 from matplotlib import pyplot as plt
+import numpy as np
 from lightning.pytorch.loggers import TensorBoardLogger
 from lightning.pytorch.callbacks import ModelCheckpoint, LearningRateMonitor
 
@@ -49,6 +50,7 @@ if __name__ == "__main__":
             "Ce": 1000, "R_cell": 3.24e-4,
             "nn_hidden_size": 128,
             "nn_num_hidden_layers": 8,
+            "I": -20,
         }
     }
 
@@ -256,3 +258,52 @@ if __name__ == "__main__":
     plt.close()
 
     print("所有图像已生成并保存。")
+
+    # =============================================================================
+    # 6. 单向热模型耦合与温度预测
+    # =============================================================================
+    print("\n开始进行单向热耦合，预测电池温度...")
+
+    # a. 定义新的热模型参数 (这些值需要根据您的具体电池来设定)
+    m_cell = 0.05  # 电池质量 (kg), 例如50g
+    Cp_cell = 1000  # 电池平均比热容 (J/kg/K)
+    h_conv = 5  # 对流换热系数 (W/m^2/K)
+    A_surf = 0.005  # 电池散热表面积 (m^2)
+    T_amb = 298.15  # 环境温度 (K)
+
+    # b. 计算开路电压 U_OCV(t)
+    # 注意：这里需要将浓度重新转换为Tensor并放到正确的设备上
+    Cp_surf_tensor = torch.tensor(Cp_surf_pred, device=config["device"], dtype=torch.float32)
+    Cn_surf_tensor = torch.tensor(Cn_surf_pred, device=config["device"], dtype=torch.float32)
+    U_ocv_pred = best_model.Up(Cp_surf_tensor) - best_model.Un(Cn_surf_tensor)
+    U_ocv_pred = U_ocv_pred.cpu().numpy()
+
+    # c. 计算总产热功率 Q_total(t)
+    # 为了简化，我们暂时忽略可逆热（熵热）
+    I_values = np.full_like(true_data.get(SPM.time_col), config['model_params']['I'])  # 假设电流是恒定的
+    Q_irr = I_values * (voltage_pred - U_ocv_pred.flatten())
+    Q_total = Q_irr
+
+    # d. 使用欧拉法求解温度随时间的变化
+    T_cell = np.zeros_like(true_data.get(SPM.time_col))
+    T_cell[0] = T_amb  # 初始温度为环境温度
+    time_steps = np.diff(true_data.get(SPM.time_col), prepend=0)
+
+    for i in range(1, len(T_cell)):
+        dt = time_steps[i]
+        Q_loss = h_conv * A_surf * (T_cell[i - 1] - T_amb)
+        dT_dt = (Q_total[i - 1] - Q_loss) / (m_cell * Cp_cell)
+        T_cell[i] = T_cell[i - 1] + dT_dt * dt
+
+    # e. 绘制温度变化曲线
+    plt.figure(figsize=(10, 6))
+    plt.plot(true_data.get(SPM.time_col), T_cell - 273.15)  # 转换为摄氏度
+    plt.xlabel("Time [s]")
+    plt.ylabel("Cell Temperature [°C]")
+    plt.title("Predicted Cell Temperature Rise")
+    plt.grid(True)
+    plt.savefig("results/plots/predicted_temperature.png")
+    plt.show()
+    plt.close()
+
+    print("温度预测完成，图像已保存。")
