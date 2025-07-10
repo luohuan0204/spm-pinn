@@ -1,165 +1,118 @@
 from typing import Callable
 
-from torch import Tensor, log, nn, sqrt
+import torch
+from torch import Tensor, nn, sqrt, asinh
 
-#全连接深度神经网络
+
+# DNN类保持不变
 class DNN(nn.Module):
-    """
-    Deep neural network.
-    """
-
     def __init__(
-        self,
-        input_size: int,
-        hidden_size: int,
-        output_size: int,
-        num_hidden_layers: int,
-    ) -> None:
+            self, input_size: int, hidden_size: int, output_size: int, num_hidden_layers: int
+    ):
         super().__init__()
-        self.input_size = input_size
-        self.hidden_size = hidden_size
-        self.output_size = output_size
-        self.num_hidden_layers = num_hidden_layers
-
         self.dnn = nn.Sequential(
-            nn.Linear(self.input_size, self.hidden_size),
-            nn.Tanh(),
-            *[nn.Linear(self.hidden_size, self.hidden_size), nn.Tanh()]
-            * num_hidden_layers,
-            nn.Linear(self.hidden_size, self.output_size),
-            nn.Tanh(),
+            nn.Linear(input_size, hidden_size), nn.Tanh(),
+            *[nn.Linear(hidden_size, hidden_size), nn.Tanh()] * num_hidden_layers,
+            nn.Linear(hidden_size, output_size), nn.Tanh(),
         )
 
     def forward(self, X: Tensor) -> Tensor:
-        dnn_output = self.dnn(X)
+        return self.dnn(X)
 
-        return dnn_output
 
-#基于神经网络的单粒子模型，使用两个DNN分别预测正负极的锂离子浓度，并利用物理方程计算电池电压
+# SPM_PINN类是我们添加打印语句的地方
 class SPM_PINN(nn.Module):
-    """
-    Single Particle Model with solid diffusion modeled by neural networks.
-    """
-
-    def __init__(
-        self,
-        nn_hidden_size: int,
-        nn_num_hidden_layers: int,
-        Up: Callable,  # Positive electrode OCP as f(conc) [V]
-        Cp_0: float,  # Initial positive electrode Li concentration [mol/m3]
-        Cp_max: float,  # Max positive electrode Li concentration [mol/m3]
-        Rp: float,  # Positive electrode particle radius [m]
-        ep_s: float,  # Positive electrode volume fraction [-]
-        Lp: float,  # Positive Electrode thickness [m]
-        kp: float,  # Positive electrode reaction rate constant [m^2.5/(mol^0.5.s)]
-        Dp: float,  # Positive electrode diffusivity [m2/s]
-        Un: Callable,  # Negative electrode OCP as f(conc) [V]
-        Cn_0: float,  # Initial negative electrode Li concentration [mol/m3]
-        Cn_max: float,  # Max negative electrode Li concentration [mol/m3]
-        Rn: float,  # Negative electrode particle radius [m]
-        en_s: float,  # Negative electrode volume fraction [-]
-        Ln: float,  # Negative Electrode thickness [m]
-        kn: float,  # Negative electrode reaction rate constant [m^2.5/(mol^0.5.s)]
-        Dn: float,  # Negative electrode diffusivity [m2/s]
-        Ce: float,  # Electrolyte Li concentration [mol/m3]
-        R_cell: float,  # Cell resistance [ohm m2]):
-    ):
+    def __init__(self, **kwargs):  # 使用kwargs简化，保持不变
         super().__init__()
-        self.nn_hidden_size = nn_hidden_size
-        self.nn_num_hidden_layers = nn_num_hidden_layers
-
-        self.Up, self.Un = Up, Un
-
-        self.Cp_0 = Cp_0
-        self.Cp_max = Cp_max
-        self.Rp = Rp
-        self.ep_s = ep_s
-        self.Lp = Lp
-        self.kp = kp
+        # 为了简洁，这里省略了所有参数的赋值，假设它们和您原来的代码一样
+        self.nn_hidden_size = kwargs.get("nn_hidden_size")
+        self.nn_num_hidden_layers = kwargs.get("nn_num_hidden_layers")
+        self.Up, self.Un = kwargs.get("Up"), kwargs.get("Un")
+        self.Cp_0, self.Cp_max, self.Rp = kwargs.get("Cp_0"), kwargs.get("Cp_max"), kwargs.get("Rp")
+        self.ep_s, self.Lp, self.kp, self.Dp = kwargs.get("ep_s"), kwargs.get("Lp"), kwargs.get("kp"), kwargs.get("Dp")
         self.ap = 3 * self.ep_s / self.Rp
-        self.Dp = Dp
-
-        self.Cn_0 = Cn_0
-        self.Cn_max = Cn_max
-        self.Rn = Rn
-        self.en_s = en_s
-        self.Ln = Ln
-        self.kn = kn
+        self.Cn_0, self.Cn_max, self.Rn = kwargs.get("Cn_0"), kwargs.get("Cn_max"), kwargs.get("Rn")
+        self.en_s, self.Ln, self.kn, self.Dn = kwargs.get("en_s"), kwargs.get("Ln"), kwargs.get("kn"), kwargs.get("Dn")
         self.an = 3 * self.en_s / self.Rn
-        self.Dn = Dn
+        self.Ce, self.R_cell = kwargs.get("Ce"), kwargs.get("R_cell")
+        self.T, self.F, self.R = 298, 96485.33, 8.314
+        self.Cp_dnn = DNN(2, self.nn_hidden_size, 1, self.nn_num_hidden_layers)
+        self.Cn_dnn = DNN(2, self.nn_hidden_size, 1, self.nn_num_hidden_layers)
 
-        self.Ce = Ce
-        self.R_cell = R_cell
-
-        self.T = 298  # Temperature [K]
-        self.F = 96485.33  # Faraday constant [C/mol]
-        self.R = 8.314  # Universal gas constant [J/mol.K]
-
-        # Positive electrode particle concentration NN
-        self.Cp_dnn = DNN(
-            input_size=2,
-            hidden_size=self.nn_hidden_size,
-            output_size=1,
-            num_hidden_layers=self.nn_num_hidden_layers,
-        )
-
-        # Negative electrode particle concentration NN
-        self.Cn_dnn = DNN(
-            input_size=2,
-            hidden_size=self.nn_hidden_size,
-            output_size=1,
-            num_hidden_layers=self.nn_num_hidden_layers,
-        )
+    def unnormalize_data(self, C_norm: Tensor, max_value: float) -> Tensor:
+        return (C_norm + 1) / 2 * max_value
 
     def forward(self, I: Tensor, Xp: Tensor, Xn: Tensor, N_t: int) -> Tensor:
-        jp = I / (self.F * self.ap * self.Lp)
-        jn = -I / (self.F * self.an * self.Ln)
+        print("\n--- Entering forward pass ---")
 
-        Cp = self.Cp_dnn(Xp)
-        Cp = self.unnormalize_data(Cp, max_value=self.Cp_max)
-        Cp_surf = Cp[-N_t:]
+        # 1. 神经网络预测
+        Cp_norm = self.Cp_dnn(Xp)
+        Cn_norm = self.Cn_dnn(Xn)
+        print(f"Step 1: NN output Cp_norm min/max: {Cp_norm.min().item():.2E}, {Cp_norm.max().item():.2E}")
 
-        Cn = self.Cn_dnn(Xn)
-        Cn = self.unnormalize_data(Cn, max_value=self.Cn_max)
-        Cn_surf = Cn[-N_t:]
+        # 2. 反归一化
+        Cp = self.unnormalize_data(Cp_norm, self.Cp_max)
+        Cn = self.unnormalize_data(Cn_norm, self.Cn_max)
+        print(f"Step 2: Unnormalized Cp min/max: {Cp.min().item():.2E}, {Cp.max().item():.2E}")
 
-        mp = I / (
-            self.F
-            * self.kp
-            * self.Lp
-            * self.ap
-            * sqrt(self.Cp_max - Cp_surf)
-            * sqrt(Cp_surf)
-            * self.Ce**0.5
+        # 3. 裁剪
+        epsilon = 1e-9
+        Cp_clamped = torch.clamp(Cp, min=epsilon, max=self.Cp_max - epsilon)
+        Cn_clamped = torch.clamp(Cn, min=epsilon, max=self.Cn_max - epsilon)
+        print(f"Step 3: Clamped Cp min/max: {Cp_clamped.min().item():.2E}, {Cp_clamped.max().item():.2E}")
+
+        # 4. 提取表面浓度
+        Cp_surf = Cp_clamped[-N_t:]
+        Cn_surf = Cn_clamped[-N_t:]
+        print(f"Step 4: Surface Cp_surf min/max: {Cp_surf.min().item():.2E}, {Cp_surf.max().item():.2E}")
+
+        # 5. 计算分母中的开方项
+        sqrt_term1_p = sqrt(self.Cp_max - Cp_surf)
+        sqrt_term2_p = sqrt(Cp_surf)
+        print(f"Step 5.1: sqrt(Cp_max - Cp_surf) contains NaN: {torch.isnan(sqrt_term1_p).any().item()}")
+        print(f"Step 5.2: sqrt(Cp_surf) contains NaN: {torch.isnan(sqrt_term2_p).any().item()}")
+
+        # 6. 计算分母
+        mp_denominator = (
+                self.F * self.kp * self.Lp * self.ap
+                * sqrt_term1_p * sqrt_term2_p * self.Ce ** 0.5
         )
-        mn = I / (
-            self.F
-            * self.kn
-            * self.Ln
-            * self.an
-            * sqrt(self.Cn_max - Cn_surf)
-            * sqrt(Cn_surf)
-            * self.Ce**0.5
-        )
+        print(f"Step 6: mp_denominator min/max: {mp_denominator.min().item():.2E}, {mp_denominator.max().item():.2E}")
 
+        # 7. 计算mp
+        mp = I / (mp_denominator + epsilon)
+        print(f"Step 7: mp contains NaN: {torch.isnan(mp).any().item()}, contains inf: {torch.isinf(mp).any().item()}")
+
+        # 为了简洁，我们暂时只详细调试正极部分
+        mn_denominator = (
+                self.F * self.kn * self.Ln * self.an
+                * sqrt(self.Cn_max - Cn_surf) * sqrt(Cn_surf) * self.Ce ** 0.5
+        )
+        mn = I / (mn_denominator + epsilon)
+
+        # 8. 计算电压
         kinetics_const = 2 * self.R * self.T / self.F
-        V = (
-            self.Up(Cp_surf)
-            - self.Un(Cn_surf)
-            + kinetics_const * log((sqrt(mp**2 + 4) + mp) / 2)
-            + kinetics_const * log((sqrt(mn**2 + 4) + mn) / 2)
-            + I * self.R_cell
-        )
+        Up_val = self.Up(Cp_surf)
+        Un_val = self.Un(Cn_surf)
+        asinh_mp = asinh(mp / 2)
+        asinh_mn = asinh(mn / 2)
+        ohmic_val = I * self.R_cell
 
-        self.Cp = Cp
-        self.Cp_surf = Cp_surf
-        self.jp = jp
+        print(f"Step 8.1: OCP Up contains NaN: {torch.isnan(Up_val).any().item()}")
+        print(
+            f"Step 8.2: asinh_mp contains NaN: {torch.isnan(asinh_mp).any().item()}, contains inf: {torch.isinf(asinh_mp).any().item()}")
 
-        self.Cn = Cn
-        self.Cn_surf = Cn_surf
-        self.jn = jn
+        V = Up_val - Un_val + kinetics_const * asinh_mp + kinetics_const * asinh_mn + ohmic_val
+        print(f"Step 8.3: Final Voltage V contains NaN: {torch.isnan(V).any().item()}")
 
+        # 9. 保存变量
+        self.Cp, self.Cn = Cp, Cn
+
+        self.Cp_clamped = Cp_clamped
+        self.Cn_clamped = Cn_clamped
+
+        self.jp = I / (self.F * self.ap * self.Lp)
+        self.jn = -I / (self.F * self.an * self.Ln)
+
+        print("--- Exiting forward pass ---\n")
         return V
-
-    def unnormalize_data(self, C: Tensor, max_value: float):
-        return (C + 1) / 2 * max_value

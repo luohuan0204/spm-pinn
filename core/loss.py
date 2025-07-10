@@ -1,143 +1,113 @@
 import torch
 from torch import Tensor, mean, nn, square
 
-#PINN的损失函数，包含5个损失项
-class PINNLoss(nn.Module):
-    def __init__(self):
-        super().__init__()
 
-        self.w1 = 0 #扩散方程损失权重
-        self.w2 = 0 #中心边界条件损失权重
-        self.w3 = 0 #表面边界条件损失权重
-        self.w4 = 0 #初始条件损失权重
-        self.w5 = 1 #数据损失权重
+class PINNLoss(nn.Module):
+    def __init__(self, weights: dict, **kwargs):
+        super().__init__()
+        self.w_data = weights.get("data", 1.0)
+        self.w_ic = weights.get("ic", 1.0)
+        self.w_bc_surf = weights.get("bc_surf", 1.0)
+        self.w_bc_center = weights.get("bc_center", 1.0)
+        self.w_pde = weights.get("pde", 1.0)
+
+        self.R_norm = kwargs.get("R_norm")
+        self.T_norm = kwargs.get("T_norm")
+        if self.R_norm is None or self.T_norm is None:
+            raise ValueError("R_norm and T_norm must be provided for loss calculation.")
 
     def forward(
-        self, V_pred: Tensor, V_true: Tensor, Xp: Tensor, Xn: Tensor, N_t: int, model
+            self, V_pred: Tensor, V_true: Tensor, Xp: Tensor, Xn: Tensor, model
     ) -> Tensor:
-        Cp, Cp0_true, Cp_max = model.Cp, model.Cp_0, model.Cp_max
-        Cn, Cn0_true, Cn_max = model.Cn, model.Cn_0, model.Cn_max
+        # 1. 提取变量
+        Cp, Cp0_true, Cp_max_param = model.Cp, model.Cp_0, model.Cp_max
+        Cn, Cn0_true, Cn_max_param = model.Cn, model.Cn_0, model.Cn_max
         jp, jn = model.jp, model.jn
         Dp, Dn = model.Dp, model.Dn
-        Rp, Rn = model.Rp, model.Rn
+        device = V_pred.device
 
-        mse_loss_fn = nn.MSELoss()
+        # 2. 数据吻合损失
+        loss_data = mean(square(V_pred - V_true))
 
-        Cp_grad = torch.autograd.grad(
-            outputs=Cp,
-            inputs=Xp,
-            grad_outputs=torch.ones_like(Cp),
-            retain_graph=True,
-            create_graph=True,
-        )[0]
-        Cn_grad = torch.autograd.grad(
-            outputs=Cn,
-            inputs=Xn,
-            grad_outputs=torch.ones_like(Cn),
-            retain_graph=True,
-            create_graph=True,
-        )[0]
+        # 启用梯度跟踪
+        Cp.requires_grad_()
+        Xp.requires_grad_()
+        Cn.requires_grad_()
+        Xn.requires_grad_()
 
-        #从梯度中提取时间和空间导数，并进行反归一化
-        dCp_dt = Cp_grad[:, 0] / 1000
-        dCp_dr = Cp_grad[:, 1] / 5.22e-6
-        dCn_dt = Cn_grad[:, 0] / 1000
-        dCn_dr = Cn_grad[:, 1] / 5.22e-6
+        # --- 3. 动态、稳健地找到边界和初始点 ---
+        t_initial = torch.min(Xp[:, 0])
+        r_center = torch.min(Xp[:, 1])
+        r_surface = torch.max(Xp[:, 1])
 
-        tp = model.unnormalize_data(Xp[:, 0], 1000)
-        rp = model.unnormalize_data(Xp[:, 1], 5.22e-6)
-        tn = model.unnormalize_data(Xn[:, 0], 1000)
-        rn = model.unnormalize_data(Xn[:, 1], 5.22e-6)
+        ic_mask_p = torch.isclose(Xp[:, 0], t_initial)
+        ic_mask_n = torch.isclose(Xn[:, 0], t_initial)
+        center_mask_p = torch.isclose(Xp[:, 1], r_center)
+        center_mask_n = torch.isclose(Xn[:, 1], r_center)
+        surface_mask_p = torch.isclose(Xp[:, 1], r_surface)
+        surface_mask_n = torch.isclose(Xn[:, 1], r_surface)
 
-        ITp = square(rp) * Dp * dCp_dr  # intermediate term
-        ITp_grad = torch.autograd.grad(
-            outputs=ITp,
-            inputs=Xp,
-            grad_outputs=torch.ones_like(ITp),
-            retain_graph=True,
-            create_graph=True,
-        )[0]
-        dITp_dr = ITp_grad[:, 1] / 5.22e-6
+        # --- 4. 计算各项物理损失 ---
 
-        ITn = square(rn) * Dn * dCn_dr  # intermediate term
-        ITn_grad = torch.autograd.grad(
-            outputs=ITn,
-            inputs=Xn,
-            grad_outputs=torch.ones_like(ITn),
-            retain_graph=True,
-            create_graph=True,
-        )[0]
-        dITn_dr = ITn_grad[:, 1] / 5.22e-6
+        # 4a. 初始条件损失 (IC)
+        Cp_max_tensor = torch.tensor(Cp_max_param, device=device, dtype=torch.float32)
+        Cn_max_tensor = torch.tensor(Cn_max_param, device=device, dtype=torch.float32)
+        loss_ic_p_raw = mean(square(Cp[ic_mask_p] - Cp0_true))
+        loss_ic_n_raw = mean(square(Cn[ic_mask_n] - Cn0_true))
+        loss_ic = (loss_ic_p_raw / square(Cp_max_tensor)) + (loss_ic_n_raw / square(Cn_max_tensor))
 
-        Cp_max, Cp_min = max(Cp), min(Cp)
-        Cn_max, Cn_min = max(Cn), min(Cn)
-        V_max, V_min = max(V_pred), min(V_pred)
+        # 计算一阶梯度
+        Cp_grad = torch.autograd.grad(Cp, Xp, grad_outputs=torch.ones_like(Cp), create_graph=True)[0]
+        Cn_grad = torch.autograd.grad(Cn, Xn, grad_outputs=torch.ones_like(Cn), create_graph=True)[0]
+        dCp_dt_norm, dCp_dr_norm = Cp_grad[:, 0], Cp_grad[:, 1]
+        dCn_dt_norm, dCn_dr_norm = Cn_grad[:, 0], Cn_grad[:, 1]
 
-        Cp0 = Cp[Xp[:, 0] == -1]
-        Cn0 = Cn[Xn[:, 0] == -1]
+        # 4b. 中心边界条件损失 (BC_Center)
+        loss_bc_center = mean(square(dCp_dr_norm[center_mask_p])) + mean(square(dCn_dr_norm[center_mask_n]))
 
-        t1_p = mean(square(dCp_dt - (1 / square(rp) * dITp_dr)))
-        t2_p = mean(square(dCp_dr[:N_t]))
-        t3_p = mean(square(Dp * dCp_dr[-N_t:] + jp))
-        t4_p = mean(square(Cp0 - Cp0_true))
+        # 4c. 表面边界条件损失 (BC_Surf)
+        loss_bc_surf_p = mean(square(dCp_dr_norm[surface_mask_p] + (jp.squeeze() * self.R_norm / (Dp + 1e-12))))
+        loss_bc_surf_n = mean(square(dCn_dr_norm[surface_mask_n] + (jn.squeeze() * self.R_norm / (Dn + 1e-12))))
+        loss_bc_surf = loss_bc_surf_p + loss_bc_surf_n
 
-        t1_n = mean(square(dCn_dt - (1 / square(rn) * dITn_dr)))
-        t2_n = mean(square(dCn_dr[:N_t]))
-        t3_n = mean(square(Dn * dCn_dr[-N_t:] + jn))
-        t4_n = mean(square(Cn0 - Cn0_true))
+        # 4d. PDE方程损失
+        d2Cp_dr2_norm = \
+        torch.autograd.grad(dCp_dr_norm, Xp, grad_outputs=torch.ones_like(dCp_dr_norm), create_graph=True)[0][:, 1]
+        d2Cn_dr2_norm = \
+        torch.autograd.grad(dCn_dr_norm, Xn, grad_outputs=torch.ones_like(dCn_dr_norm), create_graph=True)[0][:, 1]
 
-        t5 = mse_loss_fn(V_pred, V_true)
+        # 提取归一化半径 ρ
+        rho_p = Xp[:, 1]
+        rho_n = Xn[:, 1]
 
-        s1_p = square(max(tp)) / (Cp_max - Cp_min) ** 2
-        s2_p = Rp**2 / (Cp_max - Cp_min) ** 2
-        s3_p = 1 / max(square(jp))
-        s4_p = 1 / (Cp_max - Cp_min) ** 2
+        # 计算归一化PDE的右侧项
+        pde_const_p = Dp * self.T_norm / (self.R_norm ** 2)
+        pde_const_n = Dn * self.T_norm / (self.R_norm ** 2)
 
-        s1_n = square(max(tn)) / (Cn_max - Cn_min) ** 2
-        s2_n = Rn**2 / (Cn_max - Cn_min) ** 2
-        s3_n = 1 / max(square(jn))
-        s4_n = 1 / (Cn_max - Cn_min) ** 2
-        s5 = 1 / (V_max - V_min) ** 2
+        # 排除中心点 r=0 (ρ=-1)
+        pde_mask_p = ~center_mask_p
+        pde_mask_n = ~center_mask_n
 
-        # print(
-        #     f"t1_p={(self.w1 * s1_p * t1_p).item():.2E}, t1_n={(self.w1 * s1_n * t1_n).item():.2E}, t2_p={(self.w2 * s2_p * t2_p).item():.2E}, t2_n={(self.w2 * s2_n * t2_n).item():.2E}, t3_p={(self.w3 * s3_p * t3_p).item():.2E}, t3_n={(self.w3 * s3_n * t3_n).item():.2E}, t4_p={(self.w4 * s4_p * t4_p).item():.2E}, t4_n={(self.w4 * s4_n * t4_n).item():.2E}, t5={(self.w5 * s5 * t5).item():.2E}"
-        # )
+        pde_rhs_p = pde_const_p * (d2Cp_dr2_norm[pde_mask_p] + (2 / rho_p[pde_mask_p]) * dCp_dr_norm[pde_mask_p])
+        pde_rhs_n = pde_const_n * (d2Cn_dr2_norm[pde_mask_n] + (2 / rho_n[pde_mask_n]) * dCn_dr_norm[pde_mask_n])
+
+        # 计算PDE残差，并用最大浓度的平方进行归一化
+        pde_residual_p = dCp_dt_norm[pde_mask_p] - pde_rhs_p
+        pde_residual_n = dCn_dt_norm[pde_mask_n] - pde_rhs_n
+        loss_pde = mean(square(pde_residual_p / Cp_max_param)) + mean(square(pde_residual_n / Cn_max_param))
+
+        # 5. 加权求和
+        total_loss = (self.w_data * loss_data + self.w_ic * loss_ic +
+                      self.w_bc_center * loss_bc_center + self.w_bc_surf * loss_bc_surf +
+                      self.w_pde * loss_pde)
+
+        # (打印语句已在之前版本中更新，此处不再重复)
         print(
-            f"t1_p={(self.w1 * t1_p).item():.2E}, t1_n={(self.w1 * t1_n).item():.2E}, t2_p={(self.w2 * t2_p).item():.2E}, t2_n={(self.w2 * t2_n).item():.2E}, t3_p={(self.w3 * t3_p).item():.2E}, t3_n={(self.w3 * t3_n).item():.2E}, t4_p={(self.w4 * t4_p).item():.2E}, t4_n={(self.w4 * t4_n).item():.2E}, t5={(self.w5 * t5).item():.2E}"
+            f"Data:{(self.w_data * loss_data).item():.2E} | "
+            f"IC:{(self.w_ic * loss_ic).item():.2E} | "
+            f"BC_Surf:{(self.w_bc_surf * loss_bc_surf).item():.2E} | "
+            f"BC_Center:{(self.w_bc_center * loss_bc_center).item():.2E} | "
+            f"PDE:{(self.w_pde * loss_pde).item():.2E}"
         )
 
-        # return (
-        #     self.w1 * s1_p * t1_p
-        #     + self.w1 * s1_n * t1_n
-        #     + self.w2 * s2_p * t2_p
-        #     + self.w2 * s2_n * t2_n
-        #     + self.w3 * s3_p * t3_p
-        #     + self.w3 * s3_n * t3_n
-        #     + self.w4 * s4_p * t4_p
-        #     + self.w4 * s4_n * t4_n
-        #     + self.w5 * s5 * t5
-        # )
-
-        return (
-                self.w1 * t1_p
-                + self.w1 * t1_n
-                + self.w2 * t2_p
-                + self.w2 * t2_n
-                + self.w3 * t3_p
-                + self.w3 * t3_n
-                + self.w4 * t4_p
-                + self.w4 * t4_n
-                + self.w5 * t5
-        )
-
-#均方根误差损失
-class RMSE(nn.Module):
-    """Root mean square error loss function."""
-
-    def __init__(self):
-        super().__init__()
-
-    def forward(self, y_pred: Tensor, y_true: Tensor) -> Tensor:
-        mse_loss_fn = nn.MSELoss()
-        rmse = torch.sqrt(mse_loss_fn(y_pred, y_true))
-        return rmse
+        return total_loss
