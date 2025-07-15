@@ -1,113 +1,146 @@
+# core/loss.py
+
 import torch
 from torch import Tensor, mean, nn, square
 
 
 class PINNLoss(nn.Module):
-    def __init__(self, weights: dict, **kwargs):
-        super().__init__()
-        self.w_data = weights.get("data", 1.0)
-        self.w_ic = weights.get("ic", 1.0)
-        self.w_bc_surf = weights.get("bc_surf", 1.0)
-        self.w_bc_center = weights.get("bc_center", 1.0)
-        self.w_pde = weights.get("pde", 1.0)
+    """
+    一个完整的、为电-热耦合SPM模型定制的、数值稳健的PINN损失函数。
 
-        self.R_norm = kwargs.get("R_norm")
-        self.T_norm = kwargs.get("T_norm")
-        if self.R_norm is None or self.T_norm is None:
-            raise ValueError("R_norm and T_norm must be provided for loss calculation.")
+    它包含了数据吻合损失 (电压和温度)，以及五项基于物理的损失：
+    1. 初始条件 (IC)
+    2. 中心边界条件 (BC at r=0)
+    3. 表面边界条件 (BC at r=R)
+    4. 固相扩散偏微分方程 (PDE)
+    5. 热平衡常微分方程 (Thermal ODE)
+    """
+
+    def __init__(self, weights: dict, norm_params: dict, thermal_params: dict):
+        """
+        初始化损失函数。
+
+        Args:
+            weights (dict): 一个包含各项损失权重的字典。
+            norm_params (dict): 一个包含归一化所需参数的字典。
+            thermal_params (dict): 一个包含热模型物理参数的字典。
+        """
+        super().__init__()
+        self.weights = weights
+        self.norm_params = norm_params
+        self.thermal_params = thermal_params
 
     def forward(
-            self, V_pred: Tensor, V_true: Tensor, Xp: Tensor, Xn: Tensor, model
-    ) -> Tensor:
-        # 1. 提取变量
-        Cp, Cp0_true, Cp_max_param = model.Cp, model.Cp_0, model.Cp_max
-        Cn, Cn0_true, Cn_max_param = model.Cn, model.Cn_0, model.Cn_max
-        jp, jn = model.jp, model.jn
-        Dp, Dn = model.Dp, model.Dn
+            self, V_pred: Tensor, V_true: Tensor, T_true: Tensor, Xp: Tensor, Xn: Tensor, model
+    ) -> tuple[Tensor, dict]:
+
         device = V_pred.device
+        loss_dict = {
+            "data": torch.tensor(0.0, device=device),
+            "T_data": torch.tensor(0.0, device=device),  # 新增温度数据损失项
+            "ic": torch.tensor(0.0, device=device),
+            "bc_center": torch.tensor(0.0, device=device),
+            "bc_surf": torch.tensor(0.0, device=device),
+            "pde": torch.tensor(0.0, device=device),
+            "thermal": torch.tensor(0.0, device=device),
+        }
 
-        # 2. 数据吻合损失
-        loss_data = mean(square(V_pred - V_true))
+        # ====================================================================
+        # 1. 数据吻合损失 (Data Loss)
+        # ====================================================================
+        # a. 电压数据损失
+        if self.weights.get("data", 0.0) > 0:
+            loss_dict["data"] = mean(square(V_pred - V_true))
 
-        # 启用梯度跟踪
-        Cp.requires_grad_()
-        Xp.requires_grad_()
-        Cn.requires_grad_()
-        Xn.requires_grad_()
+        # b. 新增：温度数据损失
+        if self.weights.get("T_data", 0.0) > 0:
+            # 从模型中提取预测的温度 (只在表面点，因为T与r无关)
+            rR_mask_p = torch.isclose(Xp[:, 1], torch.max(Xp[:, 1]))
+            T_pred = model.T[rR_mask_p]
+            # 计算温度的均方误差损失
+            loss_dict["T_data"] = mean(square(T_pred.squeeze() - T_true.squeeze()))
 
-        # --- 3. 动态、稳健地找到边界和初始点 ---
-        t_initial = torch.min(Xp[:, 0])
-        r_center = torch.min(Xp[:, 1])
-        r_surface = torch.max(Xp[:, 1])
+        # ====================================================================
+        # 2. 物理损失 (Physics Loss)
+        # ====================================================================
+        needs_phys_grads = any(self.weights.get(k, 0.0) > 0 for k in ['ic', 'bc_center', 'bc_surf', 'pde', 'thermal'])
+        if needs_phys_grads:
+            Xp.requires_grad_(True)
+            Xn.requires_grad_(True)
 
-        ic_mask_p = torch.isclose(Xp[:, 0], t_initial)
-        ic_mask_n = torch.isclose(Xn[:, 0], t_initial)
-        center_mask_p = torch.isclose(Xp[:, 1], r_center)
-        center_mask_n = torch.isclose(Xn[:, 1], r_center)
-        surface_mask_p = torch.isclose(Xp[:, 1], r_surface)
-        surface_mask_n = torch.isclose(Xn[:, 1], r_surface)
+            # --- 2a. 电化学物理损失 ---
+            calc_conc_grads = any(self.weights.get(k, 0.0) > 0 for k in ['ic', 'bc_center', 'bc_surf', 'pde'])
 
-        # --- 4. 计算各项物理损失 ---
+            if calc_conc_grads:
+                Cp, Cn = model.Cp, model.Cn
+                Cp_grad = torch.autograd.grad(Cp.sum(), Xp, create_graph=True)[0]
+                dCp_dt_norm, dCp_dr_norm = Cp_grad[:, 0:1], Cp_grad[:, 1:2]
+                Cn_grad = torch.autograd.grad(Cn.sum(), Xn, create_graph=True)[0]
+                dCn_dt_norm, dCn_dr_norm = Cn_grad[:, 0:1], Cn_grad[:, 1:2]
 
-        # 4a. 初始条件损失 (IC)
-        Cp_max_tensor = torch.tensor(Cp_max_param, device=device, dtype=torch.float32)
-        Cn_max_tensor = torch.tensor(Cn_max_param, device=device, dtype=torch.float32)
-        loss_ic_p_raw = mean(square(Cp[ic_mask_p] - Cp0_true))
-        loss_ic_n_raw = mean(square(Cn[ic_mask_n] - Cn0_true))
-        loss_ic = (loss_ic_p_raw / square(Cp_max_tensor)) + (loss_ic_n_raw / square(Cn_max_tensor))
+                t0_mask_p = torch.isclose(Xp[:, 0], torch.min(Xp[:, 0]))
+                r0_mask_p = torch.isclose(Xp[:, 1], torch.min(Xp[:, 1]))
+                rR_mask_p = torch.isclose(Xp[:, 1], torch.max(Xp[:, 1]))
+                t0_mask_n = torch.isclose(Xn[:, 0], torch.min(Xn[:, 0]))
+                r0_mask_n = torch.isclose(Xn[:, 1], torch.min(Xn[:, 1]))
+                rR_mask_n = torch.isclose(Xn[:, 1], torch.max(Xn[:, 1]))
 
-        # 计算一阶梯度
-        Cp_grad = torch.autograd.grad(Cp, Xp, grad_outputs=torch.ones_like(Cp), create_graph=True)[0]
-        Cn_grad = torch.autograd.grad(Cn, Xn, grad_outputs=torch.ones_like(Cn), create_graph=True)[0]
-        dCp_dt_norm, dCp_dr_norm = Cp_grad[:, 0], Cp_grad[:, 1]
-        dCn_dt_norm, dCn_dr_norm = Cn_grad[:, 0], Cn_grad[:, 1]
+                if self.weights.get("ic", 0.0) > 0:
+                    loss_dict["ic"] = mean(square(Cp[t0_mask_p] - model.Cp_0)) + \
+                                      mean(square(Cn[t0_mask_n] - model.Cn_0))
 
-        # 4b. 中心边界条件损失 (BC_Center)
-        loss_bc_center = mean(square(dCp_dr_norm[center_mask_p])) + mean(square(dCn_dr_norm[center_mask_n]))
+                if self.weights.get("bc_center", 0.0) > 0:
+                    loss_dict["bc_center"] = mean(square(dCp_dr_norm[r0_mask_p])) + \
+                                             mean(square(dCn_dr_norm[r0_mask_n]))
 
-        # 4c. 表面边界条件损失 (BC_Surf)
-        loss_bc_surf_p = mean(square(dCp_dr_norm[surface_mask_p] + (jp.squeeze() * self.R_norm / (Dp + 1e-12))))
-        loss_bc_surf_n = mean(square(dCn_dr_norm[surface_mask_n] + (jn.squeeze() * self.R_norm / (Dn + 1e-12))))
-        loss_bc_surf = loss_bc_surf_p + loss_bc_surf_n
+                if self.weights.get("bc_surf", 0.0) > 0:
+                    dCp_dr_phys = dCp_dr_norm[rR_mask_p] * (2 / self.norm_params['R_p'])
+                    dCn_dr_phys = dCn_dr_norm[rR_mask_n] * (2 / self.norm_params['R_n'])
+                    Dp_surf = model.Dp_T[rR_mask_p]
+                    Dn_surf = model.Dn_T[rR_mask_n]
+                    residual_bc_p = -Dp_surf * dCp_dr_phys - model.jp
+                    residual_bc_n = -Dn_surf * dCn_dr_phys - model.jn
+                    loss_dict["bc_surf"] = mean(square(residual_bc_p)) + \
+                                           mean(square(residual_bc_n))
 
-        # 4d. PDE方程损失
-        d2Cp_dr2_norm = \
-        torch.autograd.grad(dCp_dr_norm, Xp, grad_outputs=torch.ones_like(dCp_dr_norm), create_graph=True)[0][:, 1]
-        d2Cn_dr2_norm = \
-        torch.autograd.grad(dCn_dr_norm, Xn, grad_outputs=torch.ones_like(dCn_dr_norm), create_graph=True)[0][:, 1]
+                if self.weights.get("pde", 0.0) > 0:
+                    term_pde_p = square(Xp[:, 1:2]) * model.Dp_T * dCp_dr_norm
+                    d_term_pde_p_dr = torch.autograd.grad(term_pde_p.sum(), Xp, create_graph=True)[0][:, 1:2]
+                    term_pde_n = square(Xn[:, 1:2]) * model.Dn_T * dCn_dr_norm
+                    d_term_pde_n_dr = torch.autograd.grad(term_pde_n.sum(), Xn, create_graph=True)[0][:, 1:2]
+                    dCp_dt_phys = dCp_dt_norm * (2 / self.norm_params['T_max'])
+                    dCn_dt_phys = dCn_dt_norm * (2 / self.norm_params['T_max'])
+                    laplacian_p = d_term_pde_p_dr * (2 / self.norm_params['R_p']) / (square(Xp[:, 1:2]) + 1e-9)
+                    laplacian_n = d_term_pde_n_dr * (2 / self.norm_params['R_n']) / (square(Xn[:, 1:2]) + 1e-9)
+                    pde_mask_p = ~r0_mask_p
+                    pde_mask_n = ~r0_mask_n
+                    residual_pde_p = dCp_dt_phys[pde_mask_p] - laplacian_p[pde_mask_p]
+                    residual_pde_n = dCn_dt_phys[pde_mask_n] - laplacian_n[pde_mask_n]
+                    loss_dict["pde"] = mean(square(residual_pde_p)) + \
+                                       mean(square(residual_pde_n))
 
-        # 提取归一化半径 ρ
-        rho_p = Xp[:, 1]
-        rho_n = Xn[:, 1]
+            # --- 2b. 热平衡物理损失 ---
+            if self.weights.get("thermal", 0.0) > 0:
+                T_phys, Q_gen, Q_loss = model.T, model.Q_gen, model.Q_loss
+                T_grad = torch.autograd.grad(T_phys.sum(), Xp, create_graph=True, allow_unused=True)[0]
+                if T_grad is not None:
+                    dT_dt_norm = T_grad[:, 0:1]
+                    temp_range = self.norm_params.get('Temp_range', 80.0)
+                    dT_dt_phys = dT_dt_norm * (temp_range / self.norm_params['T_max'])
+                    rR_mask_p_thermal = torch.isclose(Xp[:, 1], torch.max(Xp[:, 1]))
+                    dT_dt_phys_surf = dT_dt_phys[rR_mask_p_thermal]
+                    thermal_residual = (
+                            self.thermal_params['m_cell'] * self.thermal_params['Cp_cell'] * dT_dt_phys_surf
+                            - (Q_gen - Q_loss)
+                    )
+                    loss_dict["thermal"] = mean(square(thermal_residual / 100.0))
 
-        # 计算归一化PDE的右侧项
-        pde_const_p = Dp * self.T_norm / (self.R_norm ** 2)
-        pde_const_n = Dn * self.T_norm / (self.R_norm ** 2)
+        # ====================================================================
+        # 4. 最终加权求和
+        # ====================================================================
+        total_loss = torch.tensor(0.0, device=device)
+        for key, weight in self.weights.items():
+            if weight > 0 and key in loss_dict:  # 确保key存在
+                total_loss += weight * loss_dict[key]
 
-        # 排除中心点 r=0 (ρ=-1)
-        pde_mask_p = ~center_mask_p
-        pde_mask_n = ~center_mask_n
-
-        pde_rhs_p = pde_const_p * (d2Cp_dr2_norm[pde_mask_p] + (2 / rho_p[pde_mask_p]) * dCp_dr_norm[pde_mask_p])
-        pde_rhs_n = pde_const_n * (d2Cn_dr2_norm[pde_mask_n] + (2 / rho_n[pde_mask_n]) * dCn_dr_norm[pde_mask_n])
-
-        # 计算PDE残差，并用最大浓度的平方进行归一化
-        pde_residual_p = dCp_dt_norm[pde_mask_p] - pde_rhs_p
-        pde_residual_n = dCn_dt_norm[pde_mask_n] - pde_rhs_n
-        loss_pde = mean(square(pde_residual_p / Cp_max_param)) + mean(square(pde_residual_n / Cn_max_param))
-
-        # 5. 加权求和
-        total_loss = (self.w_data * loss_data + self.w_ic * loss_ic +
-                      self.w_bc_center * loss_bc_center + self.w_bc_surf * loss_bc_surf +
-                      self.w_pde * loss_pde)
-
-        # (打印语句已在之前版本中更新，此处不再重复)
-        print(
-            f"Data:{(self.w_data * loss_data).item():.2E} | "
-            f"IC:{(self.w_ic * loss_ic).item():.2E} | "
-            f"BC_Surf:{(self.w_bc_surf * loss_bc_surf).item():.2E} | "
-            f"BC_Center:{(self.w_bc_center * loss_bc_center).item():.2E} | "
-            f"PDE:{(self.w_pde * loss_pde).item():.2E}"
-        )
-
-        return total_loss
+        return total_loss, loss_dict

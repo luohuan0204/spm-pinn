@@ -1,309 +1,278 @@
+# scripts/training.py
+# 最终、完整、可以直接运行的版本
+
 import sys
 import os
+import pickle
 from matplotlib import pyplot as plt
 import numpy as np
+import torch
+import lightning.pytorch as pl
 from lightning.pytorch.loggers import TensorBoardLogger
 from lightning.pytorch.callbacks import ModelCheckpoint, LearningRateMonitor
 
-sys.path.append("../")
-import lightning.pytorch as pl
-from core.data_module import DataModule
+# =============================================================================
+# 1. 导入所有需要的模块
+# =============================================================================
+# 确保项目根目录在Python路径中
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
 from core.dataset import SimulationDataset
+from core.data_module import DataModule
 from core.loss import PINNLoss
 from core.ocp_torch import get_graphite_ocp, get_nmc_ocp
 from core.pinn_model import SPM_PINN
-from core.physics_model import SPM
 from core.training_module import TrainingModule
-from torch import optim, vmap
-import pickle
-import torch
-# 导入DataLoader
-from torch.utils.data import DataLoader
+from core.physics_model import SPM
 
-if __name__ == "__main__":
-    # =============================================================================
-    # 1. 配置文件
-    # =============================================================================
+
+# =============================================================================
+# 2. 配置文件 (所有可调参数都集中在这里)
+# =============================================================================
+def get_config():
+    """将所有配置集中管理，方便修改和查阅。"""
+
+    # 动态加载参数，使代码具有通用性
+    temp_dataset = SimulationDataset(data_directory="../data_coupled")
+    sample_params = temp_dataset.get_params(0)  # 从第一个数据文件中读取参数
+
     config = {
+        "run_name": "spm_pinn_coupled_final_run",  # 为本次运行命名
         "device": torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+
         "train_params": {
-            "max_epochs": 6000,  # 请务必设置一个足够大的值
-            "learning_rate": 1e-4,
+            "max_epochs": 100,  # 您可以根据需要调整训练的总轮数
+            "learning_rate": 5e-4,
         },
+
         "data_params": {
-            "data_directory": "../data",
+            "data_directory": "../data_coupled",
+            "train_split": 1.0,  # 当前为“仅训练”模式
+            "val_split": 0.0,
+            "batch_size": 1,
+            "seed": 42,
         },
-        "loss_weights": {
-        "data": 5.0,                 # <-- 开启数据损失
-        "ic": 1.0,                   # <-- 保留初始条件损失
-        "bc_center": 0.00000001,
-        "bc_surf": 0.000000005,             # <-- 开启表面边界损失
-        "pde": 0.1,
+
+        "loss_params": {
+            "weights": {
+                "data": 1.0,  # 电压数据损失
+                "T_data": 0.0,  # 温度数据损失
+                "ic": 1.0,  # 初始条件损失
+                "bc_center": 0.0,  # 中心边界条件 (权重调小)
+                "bc_surf": 0.0,  # 表面边界条件
+                "pde": 1.0,  # PDE方程损失
+                "thermal": 0.0,  # 热损失
+            },
+            "norm_params": {
+                "T_max": sample_params['duration'],
+                "R_p": sample_params['Rp'],
+                "R_n": sample_params['Rn'],
+                "Temp_range": 80.0,
+            },
+            "thermal_params": sample_params
         },
+
         "model_params": {
-            "Up": vmap(get_nmc_ocp),
-            "Cp_0": 17038.0, "Cp_max": 63104, "Rp": 5.22e-6, "ep_s": 0.335,
-            "Lp": 75.6e-6, "kp": 5e-10, "Dp": 1e-14,
-            "Un": vmap(get_graphite_ocp),
-            "Cn_0": 29866.0, "Cn_max": 33133, "Rn": 5.22e-6, "en_s": 0.75,
-            "Ln": 75.6e-6, "kn": 5e-10, "Dn": 3e-14,
-            "Ce": 1000, "R_cell": 3.24e-4,
-            "nn_hidden_size": 128,
-            "nn_num_hidden_layers": 8,
-            "I": -20,
+            "Up": get_nmc_ocp, "Un": get_graphite_ocp,
+            "nn_hidden_size": 128, "nn_num_hidden_layers": 8,
         }
     }
+    config["model_params"].update(sample_params)
+    return config
 
-    os.makedirs("results/plots", exist_ok=True)
-    os.makedirs("results/checkpoints", exist_ok=True)
-    os.makedirs("results/logs", exist_ok=True)
 
-    # =============================================================================
-    # 2. 初始化模块
-    # =============================================================================
+# =============================================================================
+# 3. 主训练与评估函数
+# =============================================================================
+def main():
+    """主函数，包含完整的训练、加载和绘图流程。"""
+    config = get_config()
+    pl.seed_everything(config["data_params"]["seed"])
 
-    # 数据加载 (只创建训练加载器)
+    run_name = config['run_name']
+    plots_dir = f"results/{run_name}/plots"
+    checkpoints_dir = f"results/{run_name}/checkpoints"
+    os.makedirs(plots_dir, exist_ok=True)
+    os.makedirs(checkpoints_dir, exist_ok=True)
+
+    # --- 初始化模块 ---
+    print("--- 1. 初始化数据模块 ---")
     dataset = SimulationDataset(data_directory=config["data_params"]["data_directory"])
-    train_loader = DataLoader(dataset, batch_size=1)
+    datamodule = DataModule(
+        dataset=dataset,
+        train_split=config["data_params"]["train_split"],
+        val_split=config["data_params"]["val_split"],
+        batch_size=config["data_params"]["batch_size"],
+        seed=config["data_params"]["seed"]
+    )
+    datamodule.setup(stage='fit')
 
-    # 模型初始化
+    print("--- 2. 初始化模型、损失函数和训练模块 ---")
     model = SPM_PINN(**config["model_params"]).to(config["device"])
+    loss_fn = PINNLoss(**config["loss_params"])
+    optimizer = torch.optim.Adam(params=model.parameters(), lr=config["train_params"]["learning_rate"])
+    lr_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', factor=0.5, patience=2000)
+    training_module = TrainingModule(model, loss_fn, optimizer, lr_scheduler)
 
-    # 损失函数和优化器
-    loss_fn = PINNLoss(weights=config["loss_weights"], T_norm=1000, R_norm=5.22e-6)
-    optimizer = optim.Adam(params=model.parameters(), lr=config["train_params"]["learning_rate"])
-
-    # 学习率调度器现在监控 train_loss
-    lr_scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', factor=0.5, patience=500, verbose=True)
-
-    training_module = TrainingModule(
-        model=model,
-        loss_function=loss_fn,
-        optimizer=optimizer,
-        lr_scheduler=lr_scheduler,
-    )
-
-    # =============================================================================
-    # 3. 设置训练器并开始训练
-    # =============================================================================
-    logger = TensorBoardLogger("results/logs", name="spm_pinn_train_only")
-
-    # ModelCheckpoint 现在也监控 train_loss
+    # --- 设置训练器 ---
+    logger = TensorBoardLogger("results/logs", name=run_name)
     checkpoint_callback = ModelCheckpoint(
-        dirpath="results/checkpoints",
-        filename="best_train_model-{epoch:02d}-{train_loss:.2e}",
-        save_top_k=1,
-        verbose=True,
-        monitor="train_loss",  # <-- 修改点
-        mode="min",
+        dirpath=checkpoints_dir,
+        filename="best_model-{epoch:02d}-{train/loss_total:.2e}",
+        save_top_k=1, verbose=True, monitor="train/loss_total", mode="min",
     )
-
     lr_monitor = LearningRateMonitor(logging_interval='epoch')
 
     trainer = pl.Trainer(
         accelerator="gpu" if torch.cuda.is_available() else "cpu",
-        devices=1,
-        max_epochs=config["train_params"]["max_epochs"],
-        logger=logger,
-        callbacks=[checkpoint_callback, lr_monitor],
-        enable_progress_bar=True,
-        enable_model_summary=True,
+        devices=1, max_epochs=config["train_params"]["max_epochs"],
+        logger=logger, callbacks=[checkpoint_callback, lr_monitor]
     )
 
-    # --- 新增：指定从第一阶段训练好的模型继续训练 ---
-    # 请确保文件名与您第一阶段训练保存的最佳模型文件名完全一致
-    # 根据您上次的日志，应该是 'best_train_model-epoch=4922-train_loss=2.61e-10.ckpt'
-    first_stage_ckpt_path = "results/pretrained_models/best_train_model-epoch=4922-train_loss=2.61e-10.ckpt"
-
-    # 检查文件是否存在，避免报错
-    if not os.path.exists(first_stage_ckpt_path):
-        raise FileNotFoundError(
-            f"错误：找不到第一阶段的检查点文件: {first_stage_ckpt_path}\n"
-            f"请先运行第一阶段的训练，或检查文件名是否正确。"
-        )
-    else:
-        print(f"成功找到第一阶段模型，将从 {first_stage_ckpt_path} 继续训练...")
-
-    # --- 修改训练调用，加入 ckpt_path 参数 ---
-    trainer.fit(
-        model=training_module,
-        train_dataloaders=train_loader,
-        ckpt_path=first_stage_ckpt_path  # <-- 核心改动在这里
-    )
+    # --- 开始训练 ---
+    print("\n--- 3. 开始训练模型 ---")
+    trainer.fit(model=training_module, train_dataloaders=datamodule.train_dataloader())
+    print("\n--- 训练完成 ---")
 
     # =============================================================================
-    # 4. 加载最佳模型并进行预测和绘图
+    # 4. 结果可视化 (加载最佳模型并绘图)
     # =============================================================================
-    print("训练完成，加载最佳模型进行预测...")
+    print("\n--- 4. 加载最佳模型进行预测和绘图 ---")
     best_model_path = checkpoint_callback.best_model_path
-    if best_model_path and os.path.exists(best_model_path):
-        # 从检查点加载训练模块，然后获取模型
-        training_module_loaded = TrainingModule.load_from_checkpoint(
-            best_model_path,
-            model=model,
-            loss_function=loss_fn,
-            optimizer=optimizer,
-            lr_scheduler=lr_scheduler
-        )
-        best_model = training_module_loaded.model
-        print(f"从 {best_model_path} 加载了最佳模型。")
+    if not best_model_path or not os.path.exists(best_model_path):
+        print("警告：未找到最佳模型检查点，将使用训练结束时的模型进行预测。")
+        best_model = training_module.model
     else:
-        # 如果没有保存任何模型，则使用训练结束时的模型
-        print("没有找到检查点文件，将使用训练结束时的最终模型。")
-        best_model = model
+        best_model_module = TrainingModule.load_from_checkpoint(
+            checkpoint_path=best_model_path, model=model,
+            loss_function=loss_fn, optimizer=optimizer
+        )
+        best_model = best_model_module.model
+        print(f"从 {best_model_path} 加载了最佳模型。")
 
     best_model.eval()
-    best_model.to(config["device"])
+    device = config["device"]
+    best_model.to(device)
 
-    # 准备预测所需的全部数据点
-    I, Xp, Xn, Y, (N_t, N_rp, N_rn) = dataset[0]
-    I, Xp, Xn, Y = I.to(config["device"]), Xp.to(config["device"]), Xn.to(config["device"]), Y.to(config["device"])
+    # --- 准备预测数据 ---
+    I, Xp, Xn, Y_V_true_tensor, Y_T_true_tensor = datamodule.dataset[0]
+    I, Xp, Xn = I.to(device), Xp.to(device), Xn.to(device)
 
-    # 运行一次完整的预测
+    # --- 运行预测 ---
     with torch.no_grad():
-        voltage_pred_tensor = best_model(I, Xp, Xn, N_t)
+        V_pred_tensor = best_model(I, Xp, Xn, Y_V_true_tensor.shape[0])
 
-        # 提取所有需要绘图的数据
-        # detach()用于切断梯度，cpu()用于移到cpu，numpy()用于转成numpy数组
-        voltage_pred = voltage_pred_tensor.cpu().numpy()[:, 0]
+    # --- 提取并处理所有需要可视化的结果 ---
+    V_pred_np = V_pred_tensor.cpu().numpy().flatten()
 
-        # 提取初始浓度 (t=0, 归一化坐标为-1)
-        Cp0_pred = best_model.Cp[Xp[:, 0] == -1].cpu().numpy()[:, 0]
-        Cn0_pred = best_model.Cn[Xn[:, 0] == -1].cpu().numpy()[:, 0]
+    rR_mask_p = torch.isclose(Xp[:, 1], torch.max(Xp[:, 1]))
+    T_pred_np = best_model.T[rR_mask_p].cpu().numpy().flatten()
 
-        # 提取最终浓度 (t=T, 归一化坐标为1)
-        Cplast_pred = best_model.Cp[Xp[:, 0] == 1].cpu().numpy()[:, 0]
-        Cnlast_pred = best_model.Cn[Xn[:, 0] == 1].cpu().numpy()[:, 0]
+    Cp_pred_full_np = best_model.Cp.cpu().numpy()
+    Cn_pred_full_np = best_model.Cn.cpu().numpy()
 
-        # 提取表面浓度随时间的变化
-        Cp_surf_pred = best_model.Cp_clamped[-N_t:].cpu().numpy()[:, 0]  # 使用裁剪后的浓度更准确
-        Cn_surf_pred = best_model.Cn_clamped[-N_t:].cpu().numpy()[:, 0]
+    rR_mask_n = torch.isclose(Xn[:, 1], torch.max(Xn[:, 1]))
+    Cp_surf_pred_np = Cp_pred_full_np[rR_mask_p.cpu().numpy()]
+    Cn_surf_pred_np = Cn_pred_full_np[rR_mask_n.cpu().numpy()]
 
-    # 加载真实数据用于对比
-    with open("../data/spm0_Dp=1e-14_Dn=3e-14", "rb") as binary_file:
-        true_data = pickle.load(binary_file)
+    # --- 加载真值用于对比 ---
+    true_data_pkg = pickle.load(open(datamodule.dataset.file_paths[0], 'rb'))
+    true_results = true_data_pkg['results']
+    time_array = true_results[SPM.time_col]
+    V_true_np = Y_V_true_tensor.cpu().numpy().flatten()
+    T_true_np = Y_T_true_tensor.cpu().numpy().flatten()
+    Cp_surf_true_np = true_results[SPM.cp_surf_col]
+    Cn_surf_true_np = true_results[SPM.cn_surf_col]
 
-    # =============================================================================
-    # 5. 绘制所有对比图
-    # =============================================================================
-    print("正在生成结果对比图...")
+    # --- 开始绘图 ---
+    print("\n--- 5. 正在生成结果对比图 ---")
 
-    # 图1: 端电压 vs. 时间
-    plt.figure(figsize=(10, 6))
-    plt.plot(true_data.get(SPM.time_col), true_data.get(SPM.voltage_col), label="True")
-    plt.plot(true_data.get(SPM.time_col), voltage_pred, label="Predicted")
-    plt.xlabel(SPM.time_col)
-    plt.ylabel(SPM.voltage_col)
-    plt.title("Terminal Voltage")
-    plt.legend()
-    plt.grid(True)
-    plt.savefig("results/plots/terminal_voltage_final.png")
-    plt.show()
-    plt.close()
+    # 图1: 电压曲线
+    plt.figure(figsize=(10, 6));
+    plt.plot(time_array, V_true_np, 'b-', label="True Voltage");
+    plt.plot(time_array, V_pred_np, 'r--', label="Predicted Voltage");
+    plt.xlabel("Time [s]");
+    plt.ylabel("Voltage [V]");
+    plt.title("Terminal Voltage: True vs. Predicted");
+    plt.legend();
+    plt.grid(True);
+    plt.savefig(f"{plots_dir}/voltage_comparison.png");
+    plt.show();
 
-    # 图2: 正极表面浓度 vs. 时间
-    plt.figure(figsize=(10, 6))
-    plt.plot(true_data.get(SPM.time_col), true_data.get(SPM.cp_surf_col), label="True")
-    plt.plot(true_data.get(SPM.time_col), Cp_surf_pred, label="Predicted")
-    plt.xlabel(SPM.time_col)
-    plt.ylabel(SPM.cp_surf_col)
-    plt.title("Positive electrode surface concentration")
-    plt.legend()
-    plt.grid(True)
-    plt.savefig("results/plots/positive_surface_concentration.png")
-    plt.show()
-    plt.close()
+    # 图2: 温度曲线
+    plt.figure(figsize=(10, 6));
+    plt.plot(time_array, T_true_np - 273.15, 'b-', label="True Temperature");
+    plt.plot(time_array, T_pred_np - 273.15, 'r--', label="Predicted Temperature");
+    plt.xlabel("Time [s]");
+    plt.ylabel("Cell Temperature [°C]");
+    plt.title("Cell Temperature: True vs. Predicted");
+    plt.legend();
+    plt.grid(True);
+    plt.savefig(f"{plots_dir}/temperature_comparison.png");
+    plt.show();
 
-    # 图3: 负极表面浓度 vs. 时间
-    plt.figure(figsize=(10, 6))
-    plt.plot(true_data.get(SPM.time_col), true_data.get(SPM.cn_surf_col), label="True")
-    plt.plot(true_data.get(SPM.time_col), Cn_surf_pred, label="Predicted")
-    plt.xlabel(SPM.time_col)
-    plt.ylabel(SPM.cn_surf_col)
-    plt.title("Negative electrode surface concentration")
-    plt.legend()
-    plt.grid(True)
-    plt.savefig("results/plots/negative_surface_concentration.png")
-    plt.show()
-    plt.close()
+    # 图3: 表面浓度曲线
+    fig, ax = plt.subplots(1, 2, figsize=(16, 6));
+    fig.suptitle("Surface Concentration: True vs. Predicted");
+    ax[0].plot(time_array, Cp_surf_true_np, 'b-', label="True");
+    ax[0].plot(time_array, Cp_surf_pred_np, 'r--', label="Predicted");
+    ax[0].set_title("Positive Electrode");
+    ax[0].set_xlabel("Time [s]");
+    ax[0].set_ylabel("Concentration [mol/m³]");
+    ax[0].legend();
+    ax[0].grid(True)
+    ax[1].plot(time_array, Cn_surf_true_np, 'b-', label="True");
+    ax[1].plot(time_array, Cn_surf_pred_np, 'r--', label="Predicted");
+    ax[1].set_title("Negative Electrode");
+    ax[1].set_xlabel("Time [s]");
+    ax[1].set_ylabel("Concentration [mol/m³]");
+    ax[1].legend();
+    ax[1].grid(True)
+    plt.savefig(f"{plots_dir}/surface_concentration.png");
+    plt.show();
 
-    # 图4: 初始浓度 vs. 半径
-    plt.figure(figsize=(10, 6))
-    plt.plot(true_data.get(SPM.rp_col)[0], Cp0_pred, label="Predicted positive")
-    plt.plot(true_data.get(SPM.rn_col)[0], Cn0_pred, label="Predicted negative")
-    plt.plot(true_data.get(SPM.rp_col)[0], true_data.get(SPM.cp_col)[0], label="True positive")
-    plt.plot(true_data.get(SPM.rn_col)[0], true_data.get(SPM.cn_col)[0], label="True negative")
-    plt.xlabel(f"{SPM.rp_col} | {SPM.rn_col}")
-    plt.ylabel("Concentration [mol/m3]")
-    plt.title("Initial concentration")
-    plt.legend()
-    plt.grid(True)
-    plt.savefig("results/plots/initial_concentration.png")
-    plt.show()
-    plt.close()
+    # 图4: 浓度分布热图
+    num_t_points = len(time_array)
+    num_rp_points = len(true_results[SPM.rp_col][0])
+    num_rn_points = len(true_results[SPM.rn_col][0])
 
-    # 图5: 最终浓度 vs. 半径
-    plt.figure(figsize=(10, 6))
-    plt.plot(true_data.get(SPM.rp_col)[-1], Cplast_pred, label="Predicted positive")
-    plt.plot(true_data.get(SPM.rn_col)[-1], Cnlast_pred, label="Predicted negative")
-    plt.plot(true_data.get(SPM.rp_col)[-1], true_data.get(SPM.cp_col)[-1], label="True positive")
-    plt.plot(true_data.get(SPM.rn_col)[-1], true_data.get(SPM.cn_col)[-1], label="True negative")
-    plt.xlabel(f"{SPM.rp_col} | {SPM.rn_col}")
-    plt.ylabel("Concentration [mol/m3]")
-    plt.title("Final concentration")
-    plt.legend()
-    plt.grid(True)
-    plt.savefig("results/plots/final_concentration.png")
-    plt.show()
-    plt.close()
+    Cp_pred_grid = Cp_pred_full_np.reshape(num_rp_points, num_t_points)
+    Cn_pred_grid = Cn_pred_full_np.reshape(num_rn_points, num_t_points)
+    Cp_true_grid = np.stack(true_results[SPM.cp_col], axis=-1)
+    Cn_true_grid = np.stack(true_results[SPM.cn_col], axis=-1)
 
-    print("所有图像已生成并保存。")
+    Rp = config["model_params"]["Rp"];
+    Rn = config["model_params"]["Rn"]
 
-    # =============================================================================
-    # 6. 单向热模型耦合与温度预测
-    # =============================================================================
-    print("\n开始进行单向热耦合，预测电池温度...")
+    fig, axes = plt.subplots(2, 2, figsize=(16, 12));
+    fig.suptitle("Particle Concentration Profile Heatmaps")
+    im = axes[0, 0].imshow(Cp_true_grid, aspect='auto', origin='lower', extent=[0, time_array[-1], 0, Rp]);
+    fig.colorbar(im, ax=axes[0, 0], label="Conc. [mol/m³]");
+    axes[0, 0].set_title("True Positive Conc.");
+    axes[0, 0].set_xlabel("Time [s]");
+    axes[0, 0].set_ylabel("Radius [m]")
+    im = axes[0, 1].imshow(Cp_pred_grid, aspect='auto', origin='lower', extent=[0, time_array[-1], 0, Rp]);
+    fig.colorbar(im, ax=axes[0, 1], label="Conc. [mol/m³]");
+    axes[0, 1].set_title("Predicted Positive Conc.");
+    axes[0, 1].set_xlabel("Time [s]");
+    axes[0, 1].set_ylabel("Radius [m]")
+    im = axes[1, 0].imshow(Cn_true_grid, aspect='auto', origin='lower', extent=[0, time_array[-1], 0, Rn]);
+    fig.colorbar(im, ax=axes[1, 0], label="Conc. [mol/m³]");
+    axes[1, 0].set_title("True Negative Conc.");
+    axes[1, 0].set_xlabel("Time [s]");
+    axes[1, 0].set_ylabel("Radius [m]")
+    im = axes[1, 1].imshow(Cn_pred_grid, aspect='auto', origin='lower', extent=[0, time_array[-1], 0, Rn]);
+    fig.colorbar(im, ax=axes[1, 1], label="Conc. [mol/m³]");
+    axes[1, 1].set_title("Predicted Negative Conc.");
+    axes[1, 1].set_xlabel("Time [s]");
+    axes[1, 1].set_ylabel("Radius [m]")
 
-    # a. 定义新的热模型参数 (这些值需要根据您的具体电池来设定)
-    m_cell = 0.05  # 电池质量 (kg), 例如50g
-    Cp_cell = 1000  # 电池平均比热容 (J/kg/K)
-    h_conv = 5  # 对流换热系数 (W/m^2/K)
-    A_surf = 0.005  # 电池散热表面积 (m^2)
-    T_amb = 298.15  # 环境温度 (K)
+    plt.tight_layout(rect=[0, 0.03, 1, 0.95]);
+    plt.savefig(f"{plots_dir}/concentration_heatmaps.png");
+    plt.show();
 
-    # b. 计算开路电压 U_OCV(t)
-    # 注意：这里需要将浓度重新转换为Tensor并放到正确的设备上
-    Cp_surf_tensor = torch.tensor(Cp_surf_pred, device=config["device"], dtype=torch.float32)
-    Cn_surf_tensor = torch.tensor(Cn_surf_pred, device=config["device"], dtype=torch.float32)
-    U_ocv_pred = best_model.Up(Cp_surf_tensor) - best_model.Un(Cn_surf_tensor)
-    U_ocv_pred = U_ocv_pred.cpu().numpy()
+    print(f"\n绘图完成！结果图已保存至 '{plots_dir}' 文件夹。")
 
-    # c. 计算总产热功率 Q_total(t)
-    # 为了简化，我们暂时忽略可逆热（熵热）
-    I_values = np.full_like(true_data.get(SPM.time_col), config['model_params']['I'])  # 假设电流是恒定的
-    Q_irr = I_values * (voltage_pred - U_ocv_pred.flatten())
-    Q_total = Q_irr
 
-    # d. 使用欧拉法求解温度随时间的变化
-    T_cell = np.zeros_like(true_data.get(SPM.time_col))
-    T_cell[0] = T_amb  # 初始温度为环境温度
-    time_steps = np.diff(true_data.get(SPM.time_col), prepend=0)
-
-    for i in range(1, len(T_cell)):
-        dt = time_steps[i]
-        Q_loss = h_conv * A_surf * (T_cell[i - 1] - T_amb)
-        dT_dt = (Q_total[i - 1] - Q_loss) / (m_cell * Cp_cell)
-        T_cell[i] = T_cell[i - 1] + dT_dt * dt
-
-    # e. 绘制温度变化曲线
-    plt.figure(figsize=(10, 6))
-    plt.plot(true_data.get(SPM.time_col), T_cell - 273.15)  # 转换为摄氏度
-    plt.xlabel("Time [s]")
-    plt.ylabel("Cell Temperature [°C]")
-    plt.title("Predicted Cell Temperature Rise")
-    plt.grid(True)
-    plt.savefig("results/plots/predicted_temperature.png")
-    plt.show()
-    plt.close()
-
-    print("温度预测完成，图像已保存。")
+if __name__ == "__main__":
+    main()
