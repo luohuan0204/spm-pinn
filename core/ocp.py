@@ -1,7 +1,7 @@
 from typing import Callable
 
 import pybamm
-from numpy import exp, ndarray, tanh
+from numpy import exp, ndarray, tanh, arctan
 
 #全局参数
 parameter_values = pybamm.ParameterValues("OKane2022")
@@ -29,11 +29,11 @@ def get_nmc_ocp(Cs: float | ndarray) -> Callable:
 
     sto = Cs / Cp_max
     return (
-        -0.8090 * sto
-        + 4.4875
-        - 0.0428 * tanh(18.5138 * (sto - 0.5542))
-        - 17.7326 * tanh(15.7890 * (sto - 0.3117))
-        + 17.5842 * tanh(15.9308 * (sto - 0.3120))
+            -10.72 * sto ** 4
+            + 23.88 * sto ** 3
+            - 16.77 * sto ** 2
+            + 2.595 * sto
+            + 4.563
     )
 
 #负极OCV计算公式
@@ -56,9 +56,10 @@ def get_graphite_ocp(Cs: float | ndarray):
 
     sto = Cs / Cn_max
     return (
-        1.9793 * exp(-39.3631 * sto)
-        + 0.2482
-        - 0.0909 * tanh(29.8538 * (sto - 0.1234))
-        - 0.04478 * tanh(14.9159 * (sto - 0.2769))
-        - 0.0205 * tanh(30.4444 * (sto - 0.6103))
+            0.1493
+            + 0.8493 * exp(-61.79 * sto)
+            + 0.3824 * exp(-665.8 * sto)
+            - exp(39.42 * sto - 41.92)
+            - 0.0313 * arctan(25.59 * sto - 4.099)
+            - 0.009434 * arctan(32.49 * sto - 15.74)
     )
