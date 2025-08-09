@@ -1,69 +1,88 @@
 import sys
 import os
 import pickle
+import numpy as np
 
-# 假设您的核心代码在上一级目录的core文件夹中
-# 如果目录结构不同，请相应调整
+# --- 1. 导入您的模块 (已按您的要求修正) ---
 sys.path.append("../")
-from core.ocp import get_graphite_ocp, get_nmc_ocp
-from core.physics_model import SPM
 
+# a. 从 core.ocp 模块只导入 OCP 函数
+from core.ocp import get_graphite_ocp, get_nmc_ocp
+
+# b. 从 core.physics_model 导入 SPM_Thermal 类和两个熵热函数
+from core.physics_model import (
+    SPM_Thermal,
+    nmc_entropic_change,
+    graphite_entropic_change
+)
+
+# --- 2. 主程序入口 ---
 if __name__ == "__main__":
-    # --- 1. 设置仿真参数 ---
-    # 设置要测试的扩散系数对
+
+    # a. 设置仿真参数
     Dps = (4e-15,)
     Dns = (3e-14,)
-
-    # 将电流密度定义为一个变量，以区分充放电
-    # 负值代表放电，正值代表充电
     current = -2.36  # 单位: A/m^2
 
-    # --- 2. 循环并运行仿真 ---
+    # b. 定义模型所需的常量 (最大浓度)
+    Cp_max_val = 63104.0
+    Cn_max_val = 33133.0
+
+
+    # c. 创建熵热函数的包装器
+    def dUp_dT_wrapper(c):
+        sto = c / Cp_max_val
+        return nmc_entropic_change(sto)
+
+
+    def dUn_dT_wrapper(c):
+        sto = c / Cn_max_val
+        return graphite_entropic_change(sto)
+
+
+    # d. 循环并运行仿真
     for n, (Dp, Dn) in enumerate(zip(Dps, Dns)):
-        # 初始化spm模型
-        spm = SPM(
-            Up=get_nmc_ocp,  # Positive electrode OCP as f(conc) [V]
-            Cp_0=17038,  # Initial positive electrode Li concentration [mol.m-3]
-            Cp_max=63104,  # Max positive electrode Li concentration [mol.m-3]
-            Rp=5.22e-6,  # Positive electrode particle radius [m]
-            ep_s=0.665,  # Positive electrode volume fraction [-]
-            Lp=75.6e-6,  # Positive Electrode thickness [m]
-            kp=3.6e-11,  # Positive electrode reaction rate constant [m^2.5/(mol^0.5.s)]
-            Dp=Dp,  # Positive electrode diffusivity [m2/s]
-            Un=get_graphite_ocp,  # Negative electrode OCP as f(conc) [V]
-            Cn_0=29866,  # Initial negative electrode Li concentration [mol.m-3]
-            Cn_max=33133,  # Max negative electrode Li concentration [mol.m-3]
-            Rn=5.86e-6,  # Negative electrode particle radius [m]
-            en_s=0.75,  # Negative electrode volume fraction [-]
-            Ln=85.2e-6,  # Negative Electrode thickness [m]
-            kn=9e-11,  # Negative electrode reaction rate constant [m^2.5/(mol^0.5.s)]
-            Dn=Dn,  # Negative electrode diffusivity [m2/s]
-            Ce=1300,  # Electrolyte Li concentration [mol.m-3]
-            R_cell=3.24e-4,  # Cell resistance [ohm m2]
+
+        # e. 初始化 SPM_Thermal 模型
+        model = SPM_Thermal(
+            # 电化学参数
+            Up=get_nmc_ocp,
+            Cp_0=17038, Cp_max=Cp_max_val, Rp=5.22e-6, ep_s=0.665, Lp=75.6e-6, kp=3.6e-11, Dp=Dp,
+            Un=get_graphite_ocp,
+            Cn_0=29866, Cn_max=Cn_max_val, Rn=5.86e-6, en_s=0.75, Ln=85.2e-6, kn=9e-11, Dn=Dn,
+            Ce=1300, R_cell=3.24e-4,
+
+            # 热模型参数 (这些是示例值，请根据您的电芯进行修改)
+            m_cell=0.1,  # 电芯质量 [kg]
+            cp_cell=1000,  # 电芯平均比热容 [J/(kg.K)]
+            A_cell=0.05,  # 电芯散热表面积 [m^2]
+            h_conv=0.5,  # 对流换热系数 [W/(m^2.K)]
+            T_amb=298.15  # 环境温度 [K]
         )
 
-        # 运行模拟
-        print(f"正在运行仿真: Dp={Dp:.1e}, Dn={Dn:.1e}, Current={current} A/m^2")
-        data = spm.solve(duration=77800, current_density=current, delta_t=100)
+        # f. 运行模拟
+        print(f"正在运行 SPM-热耦合模型仿真: Dp={Dp:.1e}, Dn={Dn:.1e}, Current={current} A/m^2")
+        duration = 77800
+        delta_t = 10
+        print(f"--- 调试信息 ---")
+        print(f"即将调用 solve 方法，参数为: duration = {duration}, delta_t = {delta_t}")
+        data = model.solve(duration=duration, current_density=current, delta_t=delta_t)
 
-        # --- 3. 保存模拟结果 (已按要求修改) ---
+        # g. 检查 solve 方法的输出结果
+        print("solve 方法已返回。")
+        if data and data.get(model.time_col):
+            print(f"返回的数据点数量为: {len(data[model.time_col])}")
+        else:
+            print("!!! 警告：solve 方法返回了空的数据！仿真未执行任何步骤。!!!")
 
-        # a. 构造包含带符号电流大小的新文件名
-        #    - 去掉了 abs() 函数，直接使用 current 变量
-        #    - 这样文件名中就会包含负号，例如 I=-49.05
-        output_filename = f"spm{n}_I={current:.3f}_Dp={Dp:.1e}_Dn={Dn:.1e}.pkl"
-
-        # b. 确保输出目录存在
+        # h. 保存模拟结果
+        output_filename = f"spm_thermal_{n}_I={current:.3f}_Dp={Dp:.1e}_Dn={Dn:.1e}.pkl"
         output_dir = "../data"
         if not os.path.exists(output_dir):
             os.makedirs(output_dir)
-            print(f"已创建目录: {output_dir}")
-
         output_path = os.path.join(output_dir, output_filename)
 
-        # c. 使用 "wb" (write binary) 模式进行重写写入
         print(f"正在将结果保存至: {output_path}")
         with open(output_path, "wb") as binary_file:
             pickle.dump(data, binary_file)
-
         print("保存成功！\n")
